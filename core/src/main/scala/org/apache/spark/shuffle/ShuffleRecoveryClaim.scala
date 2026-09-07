@@ -38,7 +38,7 @@ private[spark] final case class ShuffleRecoveryBinding(
 /**
  * Provider-owned metadata is intentionally mutable at this boundary.
  *
- * The centralized validator below snapshots it before any scheduler-visible value can exist.
+ * The centralized validator snapshots it before any scheduler-visible value can exist.
  */
 private[spark] final case class ShuffleRecoveryClaimedMapDescriptor(
     mapIndex: Int,
@@ -69,9 +69,3 @@ private[spark] case object ShuffleRecoveryClaimCorrupt extends ShuffleRecoveryCl
 private[spark] case object ShuffleRecoveryClaimUnavailable extends ShuffleRecoveryClaimResult
 private[spark] final case class ShuffleRecoveryClaimRejected(reason: String)
   extends ShuffleRecoveryClaimResult
-
-private[shuffle] trait ShuffleRecoveryClaimProvider {
-  def compatibilityId: String
-  def claim(request: ShuffleRecoveryClaimRequest): ShuffleRecoveryClaimResult
-  def release(binding: ShuffleRecoveryBinding): Unit
-}
