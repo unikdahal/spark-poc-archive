@@ -29,7 +29,7 @@ class ShuffleRecoveryAttemptContextHardeningSuite extends SparkFunSuite {
   private val Capabilities = ShuffleRecoveryLifecycleCapabilities(mayFinishGroup = false)
   private val NoExpiry = ShuffleRecoveryRetentionPolicy(None)
 
-  test("attempt context diagnostics redact all authorization and lineage identifiers") {
+  test("attempt diagnostics redact authorization and lineage identifiers") {
     val secretGroup = ShuffleRecoveryGroupKey("secret-group", "secret-lineage")
     val secretAuthorization = ShuffleRecoveryAuthorizationContext(
       "secret-principal",
@@ -48,19 +48,36 @@ class ShuffleRecoveryAttemptContextHardeningSuite extends SparkFunSuite {
       case Right(value) => value
       case Left(diagnostic) => fail(diagnostic.toString)
     }
+    val authorizationRequest = ShuffleRecoveryAuthorizationRequest(
+      secretGroup,
+      "secret-attempt",
+      secretAuthorization,
+      ShuffleRecoveryClaim,
+      Some(6L),
+      Some("secret-artifact-incarnation"))
+    val generationRequest = ShuffleRecoveryGenerationRequest(
+      secretGroup,
+      "secret-attempt",
+      "secret-principal")
 
-    val rendered = context.toString
+    val rendered = Seq(
+      context.toString,
+      secretGroup.toString,
+      secretAuthorization.toString,
+      authorizationRequest.toString,
+      generationRequest.toString)
     Seq(
       "secret-group",
       "secret-lineage",
       "secret-attempt",
       "secret-principal",
       "secret-policy",
-      "secret-view").foreach { secret =>
-      assert(!rendered.contains(secret))
+      "secret-view",
+      "secret-artifact-incarnation").foreach { secret =>
+      rendered.foreach(value => assert(!value.contains(secret)))
     }
-    assert(rendered.contains("generation=7"))
-    assert(rendered.contains("principal=redacted"))
+    assert(context.toString.contains("generation=7"))
+    assert(context.toString.contains("principal=redacted"))
   }
 
   test("reference generation allocator refuses new state after bounded capacity") {
@@ -80,6 +97,24 @@ class ShuffleRecoveryAttemptContextHardeningSuite extends SparkFunSuite {
     assert(allocator.allocate(otherGroup) == ShuffleRecoveryGenerationAllocationUnavailable)
     assert(allocator.trackedGroupCount == 1)
     assert(allocator.trackedAttemptCount(Group) == 1)
+  }
+
+  test("terminal maximum generation disables recovery") {
+    val allocator = new ReferenceShuffleRecoveryGenerationAllocator
+    val result = ShuffleRecoveryAttemptContext.fromExternalAllocation(
+      Group,
+      "attempt-max-generation",
+      Authorization,
+      Capabilities,
+      NoExpiry,
+      allocator,
+      Some(Long.MaxValue.toString),
+      100L)
+
+    assert(result.left.exists(_.code == ShuffleRecoveryGenerationInvalid))
+    assert(allocator.reserveAssigned(
+      ShuffleRecoveryGenerationRequest(Group, "attempt-max-direct", "hardening-principal"),
+      Long.MaxValue) == ShuffleRecoveryGenerationAllocationInvalid)
   }
 
   test("authorization revision exhaustion invalidates the maximum revision grant") {
@@ -131,12 +166,55 @@ class ShuffleRecoveryAttemptContextHardeningSuite extends SparkFunSuite {
     assert(assigned.left.exists(_.code == ShuffleRecoveryContextUnavailable))
   }
 
+  test("null generation allocator results disable recovery safely") {
+    val allocator = new ShuffleRecoveryGenerationAllocator {
+      override def allocate(
+          request: ShuffleRecoveryGenerationRequest): ShuffleRecoveryGenerationResult = null
+
+      override def reserveAssigned(
+          request: ShuffleRecoveryGenerationRequest,
+          generation: Long): ShuffleRecoveryGenerationResult = null
+    }
+
+    val allocated = ShuffleRecoveryAttemptContext.allocate(
+      Group,
+      "attempt-null-allocation",
+      Authorization,
+      Capabilities,
+      NoExpiry,
+      allocator,
+      100L)
+    assert(allocated.left.exists(_.code == ShuffleRecoveryContextUnavailable))
+
+    val assigned = ShuffleRecoveryAttemptContext.fromExternalAllocation(
+      Group,
+      "attempt-null-reservation",
+      Authorization,
+      Capabilities,
+      NoExpiry,
+      allocator,
+      Some("2"),
+      100L)
+    assert(assigned.left.exists(_.code == ShuffleRecoveryContextUnavailable))
+  }
+
   test("authorization authority failures become safe provider-unavailable diagnostics") {
     val context = contextAt(2L)
     val authority = new ShuffleRecoveryAuthorizationAuthority {
       override def authorize(
           request: ShuffleRecoveryAuthorizationRequest): ShuffleRecoveryAuthorizationDecision =
         throw new IllegalStateException("policy service unavailable")
+    }
+
+    val result = context.authorize(authority, ShuffleRecoveryDiscover)
+    assert(result.left.exists(_.code == ShuffleRecoveryProviderUnavailable))
+  }
+
+  test("null authorization authority results become safe unavailable diagnostics") {
+    val context = contextAt(2L)
+    val authority = new ShuffleRecoveryAuthorizationAuthority {
+      override def authorize(
+          request: ShuffleRecoveryAuthorizationRequest): ShuffleRecoveryAuthorizationDecision = null
     }
 
     val result = context.authorize(authority, ShuffleRecoveryDiscover)
