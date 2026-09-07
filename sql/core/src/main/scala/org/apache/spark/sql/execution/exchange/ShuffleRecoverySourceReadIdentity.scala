@@ -517,7 +517,7 @@ private[sql] object ShuffleRecoveryResolvedValuePolicy {
     } else {
       expression match {
         case _: Literal => IdentityMaterial
-        case _ => ProvablyNonSemantic
+        case _ => Unsupported
       }
     }
   }
