@@ -36,7 +36,7 @@ import org.apache.spark.sql.execution.{ExecSubqueryExpression, RangeExec, SparkP
  * immutable logical data view read by the already-resolved scan, not merely a mutable namespace.
  * A token is neither an authorization decision nor a lease over the underlying source.
  */
-private[sql] final class ShuffleRecoverySourceToken private (
+private[sql] final class ShuffleRecoverySourceToken private[exchange] (
     val schemaVersion: Int,
     val adapterId: String,
     tokenBytes: Array[Byte],
@@ -191,7 +191,7 @@ private[sql] trait ShuffleRecoverySourceReadAdapter {
  * Exact-class adapter registry. There is deliberately no reflection or assignable-class fallback:
  * an unregistered source implementation is a recovery miss.
  */
-private[sql] final class ShuffleRecoverySourceAdapterRegistry private (
+private[sql] final class ShuffleRecoverySourceAdapterRegistry private[exchange] (
     adaptersByClass: Map[Class[_], ShuffleRecoverySourceReadAdapter],
     bounds: ShuffleRecoverySourceTokenBounds) {
 
@@ -337,6 +337,7 @@ private[sql] object ShuffleRecoverySourceReadIdentity {
       bounds: ShuffleRecoverySourceTokenBounds): Boolean = {
     adapterId != null &&
       adapterId.nonEmpty &&
+      adapterId.length <= bounds.maxAdapterIdBytes &&
       utf8Length(adapterId) <= bounds.maxAdapterIdBytes &&
       adapterId.forall { ch =>
         ch >= 'a' && ch <= 'z' ||
@@ -353,6 +354,7 @@ private[sql] object ShuffleRecoverySourceReadIdentity {
     value != null && value.forall { text =>
       text != null &&
         (allowEmpty || text.nonEmpty) &&
+        text.length <= maximumBytes &&
         utf8Length(text) <= maximumBytes
     }
   }
