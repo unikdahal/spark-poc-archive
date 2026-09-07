@@ -88,8 +88,8 @@ private[spark] object ShuffleRecoveryAttemptContext {
       attemptInstanceId: String,
       authorization: ShuffleRecoveryAuthorizationContext,
       lifecycle: ShuffleRecoveryLifecycleCapabilities,
-      retention: ShuffleRecoveryRetentionPolicy): Either[ShuffleRecoveryAttemptDiagnostic,
-      ShuffleRecoveryAttemptContext] = {
+      retention: ShuffleRecoveryRetentionPolicy):
+      Either[ShuffleRecoveryAttemptDiagnostic, ShuffleRecoveryAttemptContext] = {
     try {
       ShuffleRecoveryManifestCodec.validateIdentifier(recoveryGroup, "recovery group")
       ShuffleRecoveryManifestCodec.validateIdentifier(attemptInstanceId, "attempt instance id")
@@ -209,8 +209,8 @@ private[spark] final class ShuffleRecoveryAttemptContextFactory(
       attemptInstanceId: String,
       authorization: ShuffleRecoveryAuthorizationContext,
       lifecycle: ShuffleRecoveryLifecycleCapabilities,
-      retention: ShuffleRecoveryRetentionPolicy): Either[ShuffleRecoveryAttemptDiagnostic,
-      ShuffleRecoveryAttemptContext] = {
+      retention: ShuffleRecoveryRetentionPolicy):
+      Either[ShuffleRecoveryAttemptDiagnostic, ShuffleRecoveryAttemptContext] = {
     val allocation = try {
       ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery generation allocation")
       allocator.allocate(recoveryGroup, authorization)
@@ -237,22 +237,19 @@ private[spark] final class ShuffleRecoveryAttemptContextFactory(
           }
         }
       }
-      case ShuffleRecoveryGenerationAllocationRejected => Left(ShuffleRecoveryGenerationInvalid)
-      case ShuffleRecoveryGenerationAllocationUnavailable => Left(ShuffleRecoveryContextUnavailable)
-      case _ => Left(ShuffleRecoveryGenerationInvalid)
+      case ShuffleRecoveryGenerationAllocationRejected =>
+        Left(ShuffleRecoveryGenerationInvalid)
+      case ShuffleRecoveryGenerationAllocationUnavailable =>
+        Left(ShuffleRecoveryContextUnavailable)
     }
   }
 }
 
 private[spark] sealed trait ShuffleRecoveryAuthorizationAction
-private[spark] case object ShuffleRecoveryDiscover
-  extends ShuffleRecoveryAuthorizationAction
-private[spark] case object ShuffleRecoveryClaim
-  extends ShuffleRecoveryAuthorizationAction
-private[spark] case object ShuffleRecoveryInstall
-  extends ShuffleRecoveryAuthorizationAction
-private[spark] case object ShuffleRecoveryFinishGroup
-  extends ShuffleRecoveryAuthorizationAction
+private[spark] case object ShuffleRecoveryDiscover extends ShuffleRecoveryAuthorizationAction
+private[spark] case object ShuffleRecoveryClaim extends ShuffleRecoveryAuthorizationAction
+private[spark] case object ShuffleRecoveryInstall extends ShuffleRecoveryAuthorizationAction
+private[spark] case object ShuffleRecoveryFinishGroup extends ShuffleRecoveryAuthorizationAction
 
 private[spark] sealed trait ShuffleRecoveryAuthorizationResult
 private[spark] final case class ShuffleRecoveryAuthorized(policyRevision: Long)
@@ -281,9 +278,7 @@ private[shuffle] trait ShuffleRecoveryAuthenticatedClaimProvider {
   def release(binding: ShuffleRecoveryBinding): Unit
 }
 
-/**
- * Reference adapter that performs provider-side authorization immediately before a legacy claim.
- */
+/** Performs provider-side current-use authorization immediately before a legacy provider claim. */
 private[spark] final class ShuffleRecoveryAuthorizingClaimProvider(
     delegate: ShuffleRecoveryClaimProvider,
     authority: ShuffleRecoveryAuthorizationAuthority)
@@ -302,13 +297,14 @@ private[spark] final class ShuffleRecoveryAuthorizingClaimProvider(
       return ShuffleRecoveryClaimRejected("authenticated claim context is unavailable")
     }
     authorize(request.attemptContext) match {
-      case ShuffleRecoveryAuthorized(revision) if revision == request.policyRevision =>
+      case ShuffleRecoveryAuthorized(revision) if revision > 0L =>
         delegate.claim(request.request)
       case _: ShuffleRecoveryAuthorized =>
-        ShuffleRecoveryClaimRejected("authorization changed before provider claim")
+        ShuffleRecoveryClaimRejected("provider authorization revision is invalid")
       case ShuffleRecoveryAuthorizationDenied =>
         ShuffleRecoveryClaimRejected("provider authorization rejected")
-      case ShuffleRecoveryAuthorizationUnavailable => ShuffleRecoveryClaimUnavailable
+      case ShuffleRecoveryAuthorizationUnavailable =>
+        ShuffleRecoveryClaimUnavailable
     }
   }
 
@@ -344,7 +340,7 @@ private[shuffle] trait ShuffleRecoveryGroupFinisher {
 }
 
 /**
- * Attempt-local lifecycle fencing for authorization, prepared reservations, and provider bindings.
+ * Attempt-local lifecycle fencing for discovery, claims, reservations, and provider bindings.
  *
  * stop() never invokes group cleanup. Binding release is performed after the lifecycle lock is
  * dropped, so blocking provider cleanup cannot deadlock scheduler-local state.
@@ -365,57 +361,78 @@ private[spark] final class ShuffleRecoveryAttemptLifecycle(
   private val bindings = mutable.LinkedHashMap.empty[String, ActiveBinding]
   private var stopped = false
 
-  def authorizeCurrent(
-      action: ShuffleRecoveryAuthorizationAction): Either[ShuffleRecoveryAttemptDiagnostic, Long] = {
-    if (isStopped) {
-      Left(ShuffleRecoveryContextUnavailable)
-    } else {
-      val result = try {
-        ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery authorization")
-        authority.authorize(context, action)
-      } catch {
-        case NonFatal(_) => ShuffleRecoveryAuthorizationUnavailable
-      }
-      result match {
-        case ShuffleRecoveryAuthorized(revision) if revision > 0L => Right(revision)
-        case _: ShuffleRecoveryAuthorized => Left(ShuffleRecoveryAuthorizationRejected)
-        case ShuffleRecoveryAuthorizationDenied => Left(ShuffleRecoveryAuthorizationRejected)
-        case ShuffleRecoveryAuthorizationUnavailable => Left(ShuffleRecoveryProviderUnavailable)
-      }
+  def findCompatible(
+      identity: ShuffleRecoveryFeasibilityIdentity,
+      lookup: ShuffleRecoveryCandidateLookup,
+      nowMillis: Long): Either[ShuffleRecoveryAttemptDiagnostic, ShuffleRecoveryManifest] = {
+    if (identity == null || lookup == null || nowMillis < 0L) {
+      return Left(ShuffleRecoveryContextUnavailable)
+    }
+    authorizeCurrent(ShuffleRecoveryDiscover) match {
+      case Left(reason) => Left(reason)
+      case Right(_) =>
+        val candidate = try {
+          ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery candidate discovery")
+          lookup.findCompatible(context.recoveryGroup, identity, context.generation)
+        } catch {
+          case NonFatal(_) => return Left(ShuffleRecoveryProviderUnavailable)
+        }
+        if (isStopped) {
+          Left(ShuffleRecoveryContextUnavailable)
+        } else {
+          candidate match {
+            case None => Left(ShuffleRecoverySemanticIdentityMiss)
+            case Some(value) => candidateAllowed(value, nowMillis).map(_ => value)
+          }
+        }
     }
   }
 
-  def candidateAllowed(
-      candidate: ShuffleRecoveryManifest): Either[ShuffleRecoveryAttemptDiagnostic, Long] = {
-    if (candidate == null || candidate.recoveryGroup != context.recoveryGroup) {
-      Left(ShuffleRecoverySemanticIdentityMiss)
-    } else if (candidate.generation <= 0L || candidate.generation >= context.generation) {
-      Left(ShuffleRecoveryGenerationInvalid)
-    } else {
-      authorizeCurrent(ShuffleRecoveryDiscover)
+  def claim(
+      candidate: ShuffleRecoveryManifest,
+      target: ShuffleRecoveryAdoptionTarget,
+      provider: ShuffleRecoveryAuthenticatedClaimProvider):
+      Either[ShuffleRecoveryAttemptDiagnostic, ShuffleRecoveryClaimed] = {
+    if (!validClaimTarget(candidate, target, provider)) {
+      return Left(ShuffleRecoverySemanticIdentityMiss)
     }
-  }
-
-  def registerBinding(
-      binding: ShuffleRecoveryBinding,
-      provider: ShuffleRecoveryAuthenticatedClaimProvider): Boolean = {
-    if (binding == null || provider == null || binding.recoveryGroup != context.recoveryGroup ||
-        binding.publishingGeneration <= 0L || binding.publishingGeneration >= context.generation) {
-      return false
+    authorizeCurrent(ShuffleRecoveryClaim) match {
+      case Left(reason) => Left(reason)
+      case Right(policyRevision) =>
+        val request = ShuffleRecoveryClaimRequest(
+          candidate.recoveryGroup,
+          candidate.generation,
+          candidate.incarnationId,
+          candidate.identity.providerCompatibilityId,
+          target.targetShuffleId,
+          candidate.mapperCount,
+          candidate.reducerCount,
+          candidate.mapArtifacts)
+        val result = try {
+          ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery provider claim")
+          provider.claim(ShuffleRecoveryAuthenticatedClaimRequest(
+            context,
+            policyRevision,
+            request))
+        } catch {
+          case NonFatal(_) => ShuffleRecoveryClaimUnavailable
+        }
+        result match {
+          case claimed: ShuffleRecoveryClaimed =>
+            if (registerBinding(claimed.binding, provider)) {
+              Right(claimed)
+            } else {
+              Left(ShuffleRecoveryContextUnavailable)
+            }
+          case ShuffleRecoveryClaimUnavailable => Left(ShuffleRecoveryProviderUnavailable)
+          case ShuffleRecoveryClaimMissing => Left(ShuffleRecoverySemanticIdentityMiss)
+          case ShuffleRecoveryClaimCorrupt => Left(ShuffleRecoverySemanticIdentityMiss)
+          case ShuffleRecoveryClaimRejected(reason) if reason != null &&
+              reason.toLowerCase(java.util.Locale.ROOT).contains("authorization") =>
+            Left(ShuffleRecoveryAuthorizationRejected)
+          case _: ShuffleRecoveryClaimRejected => Left(ShuffleRecoverySemanticIdentityMiss)
+        }
     }
-    val accepted = synchronized {
-      if (stopped || bindings.size >= ShuffleRecoveryAttemptLifecycle.MaxBindings ||
-          bindings.contains(binding.bindingId)) {
-        false
-      } else {
-        bindings.put(binding.bindingId, ActiveBinding(binding, provider))
-        true
-      }
-    }
-    if (!accepted) {
-      releaseQuietly(provider, binding)
-    }
-    accepted
   }
 
   /** Revalidates current policy before the reservation can install scheduler-local state. */
@@ -452,8 +469,9 @@ private[spark] final class ShuffleRecoveryAttemptLifecycle(
   }
 
   /**
-   * Explicit group completion. This method is deliberately separate from stop() and requires both
-   * a lifecycle capability and a fresh authorization decision.
+   * Explicit group completion remains separate from attempt stop. The external authority may
+   * complete the lineage after this attempt has ended, so authorization here does not depend on
+   * attempt-local stopped state. stop() never reaches this path.
    */
   def finishGroup(
       completion: ShuffleRecoveryGroupCompletion,
@@ -461,10 +479,12 @@ private[spark] final class ShuffleRecoveryAttemptLifecycle(
     if (!validCompletion(completion) || finisher == null || !context.lifecycle.mayFinishGroup) {
       return ShuffleRecoveryGroupFinishRejected
     }
-    authorizeCurrent(ShuffleRecoveryFinishGroup) match {
-      case Left(ShuffleRecoveryAuthorizationRejected) => ShuffleRecoveryGroupFinishRejected
-      case Left(_) => ShuffleRecoveryGroupFinishUnavailable
-      case Right(_) =>
+    authorizeGroupFinish() match {
+      case ShuffleRecoveryAuthorizationDenied => ShuffleRecoveryGroupFinishRejected
+      case ShuffleRecoveryAuthorizationUnavailable => ShuffleRecoveryGroupFinishUnavailable
+      case ShuffleRecoveryAuthorized(revision) if revision <= 0L =>
+        ShuffleRecoveryGroupFinishRejected
+      case _: ShuffleRecoveryAuthorized =>
         try {
           ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery group completion")
           finisher.finishGroup(completion)
@@ -472,6 +492,77 @@ private[spark] final class ShuffleRecoveryAttemptLifecycle(
           case NonFatal(_) => ShuffleRecoveryGroupFinishUnavailable
         }
     }
+  }
+
+  private def authorizeCurrent(
+      action: ShuffleRecoveryAuthorizationAction): Either[ShuffleRecoveryAttemptDiagnostic, Long] = {
+    if (isStopped) {
+      Left(ShuffleRecoveryContextUnavailable)
+    } else {
+      val result = try {
+        ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery authorization")
+        authority.authorize(context, action)
+      } catch {
+        case NonFatal(_) => ShuffleRecoveryAuthorizationUnavailable
+      }
+      result match {
+        case ShuffleRecoveryAuthorized(revision) if revision > 0L => Right(revision)
+        case _: ShuffleRecoveryAuthorized => Left(ShuffleRecoveryAuthorizationRejected)
+        case ShuffleRecoveryAuthorizationDenied => Left(ShuffleRecoveryAuthorizationRejected)
+        case ShuffleRecoveryAuthorizationUnavailable => Left(ShuffleRecoveryProviderUnavailable)
+      }
+    }
+  }
+
+  private def candidateAllowed(
+      candidate: ShuffleRecoveryManifest,
+      nowMillis: Long): Either[ShuffleRecoveryAttemptDiagnostic, Unit] = {
+    if (candidate == null || candidate.recoveryGroup != context.recoveryGroup) {
+      Left(ShuffleRecoverySemanticIdentityMiss)
+    } else if (candidate.generation <= 0L || candidate.generation >= context.generation) {
+      Left(ShuffleRecoveryGenerationInvalid)
+    } else if (candidate.publicationTimestampMillis < 0L ||
+        candidate.publicationTimestampMillis > nowMillis) {
+      Left(ShuffleRecoverySemanticIdentityMiss)
+    } else if (nowMillis - candidate.publicationTimestampMillis >= context.retention.ttlMillis) {
+      Left(ShuffleRecoveryLifecycleExpired)
+    } else {
+      Right(())
+    }
+  }
+
+  private def validClaimTarget(
+      candidate: ShuffleRecoveryManifest,
+      target: ShuffleRecoveryAdoptionTarget,
+      provider: ShuffleRecoveryAuthenticatedClaimProvider): Boolean = {
+    candidate != null && target != null && provider != null &&
+      candidate.recoveryGroup == context.recoveryGroup &&
+      candidate.generation > 0L && candidate.generation < context.generation &&
+      candidate.mapperCount == target.mapperCount &&
+      candidate.reducerCount == target.reducerCount &&
+      provider.compatibilityId == candidate.identity.providerCompatibilityId
+  }
+
+  private def registerBinding(
+      binding: ShuffleRecoveryBinding,
+      provider: ShuffleRecoveryAuthenticatedClaimProvider): Boolean = {
+    val bindingIsValid = binding != null && provider != null &&
+      binding.recoveryGroup == context.recoveryGroup &&
+      binding.publishingGeneration > 0L && binding.publishingGeneration < context.generation
+    val accepted = synchronized {
+      if (!bindingIsValid || stopped ||
+          bindings.size >= ShuffleRecoveryAttemptLifecycle.MaxBindings ||
+          bindings.contains(binding.bindingId)) {
+        false
+      } else {
+        bindings.put(binding.bindingId, ActiveBinding(binding, provider))
+        true
+      }
+    }
+    if (!accepted && binding != null && provider != null) {
+      releaseQuietly(provider, binding)
+    }
+    accepted
   }
 
   private def validCompletion(completion: ShuffleRecoveryGroupCompletion): Boolean = {
@@ -488,6 +579,15 @@ private[spark] final class ShuffleRecoveryAttemptLifecycle(
       } catch {
         case NonFatal(_) => false
       }
+    }
+  }
+
+  private def authorizeGroupFinish(): ShuffleRecoveryAuthorizationResult = {
+    try {
+      ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery group authorization")
+      authority.authorize(context, ShuffleRecoveryFinishGroup)
+    } catch {
+      case NonFatal(_) => ShuffleRecoveryAuthorizationUnavailable
     }
   }
 
