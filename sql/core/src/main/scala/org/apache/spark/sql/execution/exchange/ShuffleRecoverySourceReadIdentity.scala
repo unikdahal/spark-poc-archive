@@ -193,7 +193,6 @@ private[sql] trait ShuffleRecoverySourceReadAdapter {
  */
 private[sql] final class ShuffleRecoverySourceAdapterRegistry private (
     adaptersByClass: Map[Class[_], ShuffleRecoverySourceReadAdapter],
-    adapterIds: Set[String],
     bounds: ShuffleRecoverySourceTokenBounds) {
 
   import ShuffleRecoverySourceIdentityMiss._
@@ -215,7 +214,10 @@ private[sql] final class ShuffleRecoverySourceAdapterRegistry private (
             case null => Miss(NullCandidate)
             case ShuffleRecoverySourceAdapterResult.Unavailable => Miss(SourceViewUnavailable)
             case ShuffleRecoverySourceAdapterResult.Candidate(candidate) =>
-              ShuffleRecoverySourceReadIdentity.validateCandidate(candidate, adapterIds, bounds)
+              ShuffleRecoverySourceReadIdentity.validateCandidate(
+                candidate,
+                Set(adapter.adapterId),
+                bounds)
           }
       }
     }
@@ -272,7 +274,6 @@ private[sql] object ShuffleRecoverySourceReadIdentity {
     require(adapters.map(_.adapterId).distinct.size == adapters.size, "duplicate source adapter id")
     new ShuffleRecoverySourceAdapterRegistry(
       pairs.toMap,
-      adapters.map(_.adapterId).toSet,
       bounds)
   }
 
