@@ -136,11 +136,14 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
   }
 
   test("unmodeled operators fail closed even when the opportunity allowlist knows them") {
-    val aggregatePlan = spark.range(0, 32, 1, 4).groupBy().count().queryExecution.executedPlan
-    val exchange = ShuffleExchangeExec(HashPartitioning(aggregatePlan.output.take(1), 2), aggregatePlan)
+    withSQLConf("spark.sql.adaptive.enabled" -> "false") {
+      val aggregatePlan = spark.range(0, 32, 1, 4).groupBy().count().queryExecution.executedPlan
+      val exchange =
+        ShuffleExchangeExec(HashPartitioning(aggregatePlan.output.take(1), 2), aggregatePlan)
 
-    assert(buildResult(exchange, aggregatePlan) ===
-      ShuffleRecoveryIdentityRejected(UnsupportedOperator))
+      assert(buildResult(exchange, aggregatePlan) ===
+        ShuffleRecoveryIdentityRejected(UnsupportedOperator))
+    }
   }
 
   test("range partitioning remains outside the supported identity slice") {

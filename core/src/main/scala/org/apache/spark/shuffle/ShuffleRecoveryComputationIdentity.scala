@@ -160,7 +160,9 @@ private[spark] object ShuffleRecoveryExpressionKind {
   case object EqualTo extends ShuffleRecoveryExpressionKind { override val tag: Int = 7 }
   case object EqualNullSafe extends ShuffleRecoveryExpressionKind { override val tag: Int = 8 }
   case object GreaterThan extends ShuffleRecoveryExpressionKind { override val tag: Int = 9 }
-  case object GreaterThanOrEqual extends ShuffleRecoveryExpressionKind { override val tag: Int = 10 }
+  case object GreaterThanOrEqual extends ShuffleRecoveryExpressionKind {
+    override val tag: Int = 10
+  }
   case object LessThan extends ShuffleRecoveryExpressionKind { override val tag: Int = 11 }
   case object LessThanOrEqual extends ShuffleRecoveryExpressionKind { override val tag: Int = 12 }
   case object And extends ShuffleRecoveryExpressionKind { override val tag: Int = 13 }

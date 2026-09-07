@@ -33,6 +33,7 @@ import org.apache.spark.shuffle.{
   ShuffleRecoveryIntValue,
   ShuffleRecoveryLongValue,
   ShuffleRecoveryMapperDecomposition,
+  ShuffleRecoveryNullValue,
   ShuffleRecoveryOperatorKind,
   ShuffleRecoveryOperatorNode,
   ShuffleRecoveryOutputContract,
@@ -40,8 +41,7 @@ import org.apache.spark.shuffle.{
   ShuffleRecoveryPartitioning,
   ShuffleRecoverySinglePartition,
   ShuffleRecoverySourceToken,
-  ShuffleRecoveryStringValue,
-  ShuffleRecoveryNullValue}
+  ShuffleRecoveryStringValue}
 import org.apache.spark.sql.catalyst.expressions.{
   Alias,
   And,
@@ -51,8 +51,8 @@ import org.apache.spark.sql.catalyst.expressions.{
   BoundReference,
   EqualNullSafe,
   EqualTo,
-  ExprId,
   Expression,
+  ExprId,
   GreaterThan,
   GreaterThanOrEqual,
   IsNotNull,
