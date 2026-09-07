@@ -90,6 +90,26 @@ private[spark] case object ShuffleRecoveryReadSupported extends ShuffleRecoveryR
 private[spark] final case class ShuffleRecoveryReadUnsupported(reason: String)
   extends ShuffleRecoveryReadDecision
 
+/**
+ * One bounded request for exact physical block lengths of an adopted shuffle.
+ *
+ * The local binding generation fences stale executor requests after all-or-nothing invalidation.
+ * Validation is intentionally performed by the driver against the currently installed binding;
+ * request fields are not trusted merely because they arrived through Spark RPC.
+ */
+private[spark] final case class ShuffleRecoveryExactBlockQuery(
+    targetShuffleId: Int,
+    localBindingGeneration: Long,
+    startMapIndex: Int,
+    endMapIndex: Int,
+    startReduceId: Int,
+    endReduceId: Int)
+
+private[spark] object ShuffleRecoveryExactBlockQuery {
+  /** Caps one provider query independently of the manifest's mapper/reducer limits. */
+  val MaxRequestedBlocks: Long = 1L * 1024L * 1024L
+}
+
 /** Exact provider-derived metadata for one non-empty recovered shuffle block. */
 private[spark] final case class ShuffleRecoveryExactBlock(
     mapIndex: Int,
