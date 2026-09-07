@@ -55,6 +55,10 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
       val binding: ShuffleRecoveryBinding,
       val provider: ReferenceShuffleProvider)
 
+  private final case class InspectedMap(
+      descriptor: ShuffleRecoveryClaimedMapDescriptor,
+      bytesByReducer: Array[Long])
+
   private final class ReferenceBlockMetadataAdapter(
       delegate: ReferenceShuffleBlockMetadata) extends DurableShuffleRecoveryBlockMetadata {
     override val offset: Long = delegate.offset
@@ -87,7 +91,7 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
       DurableShuffleRecoveryContract.ArtifactFormatVersion,
       DurableShuffleRecoveryContract.ReadVersion,
       Array(DurableShuffleRecoveryContract.ExactReducerRangeFetch),
-      exactReducerAggregateStatistics = false,
+      exactReducerAggregateStatistics = true,
       mapperLocalBlockMetadataQueryable = true,
       DurableShuffleRecoveryContract.ExactIndexSha256AndReducerChecksum,
       immutableIncarnations = true,
@@ -160,11 +164,25 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     }
 
     val maps = new Array[ShuffleRecoveryClaimedMapDescriptor](request.mapperCount)
+    val bytesByReducer = new Array[Long](request.reducerCount)
+    var totalDataSize = 0L
     var mapIndex = 0
     while (mapIndex < request.mapperCount) {
       inspectMap(provider, request, request.mapArtifacts(mapIndex)) match {
         case Left(result) => return result
-        case Right(descriptor) => maps(mapIndex) = descriptor
+        case Right(inspected) =>
+          maps(mapIndex) = inspected.descriptor
+          try {
+            totalDataSize = Math.addExact(totalDataSize, inspected.descriptor.dataLength)
+            var reduceId = 0
+            while (reduceId < request.reducerCount) {
+              bytesByReducer(reduceId) = Math.addExact(
+                bytesByReducer(reduceId), inspected.bytesByReducer(reduceId))
+              reduceId += 1
+            }
+          } catch {
+            case _: ArithmeticException => return ShuffleRecoveryClaimCorrupt
+          }
       }
       mapIndex += 1
     }
@@ -188,7 +206,11 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
         capabilities.providerCapabilityId,
         request.targetShuffleId,
         capabilities.readVersion,
-        maps))
+        maps,
+        ShuffleRecoveryClaimedStatistics(
+          totalDataSize = Some(totalDataSize),
+          bytesByReducer = Some(bytesByReducer),
+          numOutputRows = None)))
   }
 
   override def release(binding: ShuffleRecoveryBinding): Unit = {
@@ -607,7 +629,7 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
       provider: ReferenceShuffleProvider,
       request: ShuffleRecoveryClaimRequest,
       artifact: ShuffleRecoveryMapArtifact):
-      Either[ShuffleRecoveryClaimResult, ShuffleRecoveryClaimedMapDescriptor] = {
+      Either[ShuffleRecoveryClaimResult, InspectedMap] = {
     if (artifact == null || artifact.mapIndex < 0 || artifact.mapIndex >= request.mapperCount) {
       return Left(ShuffleRecoveryClaimRejected("claim request contains an invalid map artifact"))
     }
@@ -660,6 +682,7 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
         "manifest artifact shape does not match immutable provider bytes"))
     }
 
+    val reducerBytes = new Array[Long](request.reducerCount)
     var emptyBlocks = 0
     var nonEmptyBlocks = 0
     var physicalBlockBytes = 0L
@@ -667,9 +690,12 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     try {
       while (reduceId < request.reducerCount) {
         val block = resolved.blockMetadata(reduceId)
-        if (block.offset < 0L || block.length < 0L) {
+        if (block.offset < 0L || block.length < 0L ||
+            block.offset > resolved.dataLength ||
+            block.length > resolved.dataLength - block.offset) {
           return Left(ShuffleRecoveryClaimCorrupt)
         }
+        reducerBytes(reduceId) = block.length
         if (block.isEmpty) {
           emptyBlocks = Math.addExact(emptyBlocks, 1)
         } else {
@@ -695,16 +721,18 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
       case _: IOException =>
         return Left(classifyValidatedReadFailure(mapDirectory, requiredFiles))
     }
-    Right(ShuffleRecoveryClaimedMapDescriptor(
-      artifact.mapIndex,
-      winnerHandle,
-      resolved.numReducers,
-      resolved.dataLength,
-      resolved.indexBytes,
-      digest,
-      emptyBlocks,
-      nonEmptyBlocks,
-      physicalBlockBytes))
+    Right(InspectedMap(
+      ShuffleRecoveryClaimedMapDescriptor(
+        artifact.mapIndex,
+        winnerHandle,
+        resolved.numReducers,
+        resolved.dataLength,
+        resolved.indexBytes,
+        digest,
+        emptyBlocks,
+        nonEmptyBlocks,
+        physicalBlockBytes),
+      reducerBytes))
   }
 
   private def digestExactIndex(indexPath: Path, expectedLength: Long): Array[Byte] = {
