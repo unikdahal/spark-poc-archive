@@ -35,12 +35,12 @@ private[spark] final case class ShuffleRecoveryReadMetrics(
     bytesRead: Long)
 
 /**
- * Feasibility-only read indirection for an adopted reference-provider shuffle.
+ * Feasibility-only read indirection for an adopted durable-provider shuffle.
  *
  * The scheduler installs only an immutable current-shuffle-id binding. Provider access remains on
  * the ordinary shuffle fetch thread through [[getBlockData]], never on the DAGScheduler event
- * loop. A production provider integration will need an executor-visible compact descriptor rather
- * than this local reference-provider binding.
+ * loop. The provider can answer exact reducer ranges lazily; this resolver does not require a
+ * provider-specific M x R descriptor in driver memory.
  */
 private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
     conf: SparkConf,
@@ -48,7 +48,7 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
   extends IndexShuffleBlockResolver(conf, null, taskIdMapsForShuffle) {
 
   private final class RecoveredReadBinding(
-      val provider: ReferenceShuffleRecoveryClaimProvider,
+      val provider: DurableShuffleRecoveryProvider,
       val binding: ShuffleRecoveryBinding,
       val mapperCount: Int,
       val reducerCount: Int,
@@ -73,7 +73,7 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
 
   private[spark] def installRecoveredBinding(
       targetShuffleId: Int,
-      provider: ReferenceShuffleRecoveryClaimProvider,
+      provider: DurableShuffleRecoveryProvider,
       binding: ShuffleRecoveryBinding,
       mapperCount: Int,
       reducerCount: Int,
@@ -203,9 +203,9 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
   }
 
   private[spark] def openBoundMapForPreparation(
-      provider: ReferenceShuffleRecoveryClaimProvider,
+      provider: DurableShuffleRecoveryProvider,
       binding: ShuffleRecoveryBinding,
-      mapIndex: Int): ReferenceShuffleResolvedMap = {
+      mapIndex: Int): DurableShuffleRecoveryResolvedMap = {
     provider.openBoundMap(binding, mapIndex)
   }
 
@@ -222,9 +222,8 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
         }
 
       case batch: ShuffleBlockBatchId if recoveredBindings.containsKey(batch.shuffleId) =>
-        // The Phase 0 reference binding intentionally disables batch fetch so every provider read
-        // retains exact reducer addressing. A scalable batched representation is a later design.
-        throw new IOException("batch fetch is disabled for an adopted reference shuffle")
+        // Batched fetch is disabled until the durable contract grows an exact batch representation.
+        throw new IOException("batch fetch is disabled for an adopted durable shuffle")
 
       case _ =>
         super.getBlockData(blockId, dirs)
