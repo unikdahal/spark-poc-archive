@@ -3,14 +3,14 @@
 Status: **preregistered, not executed**
 
 This document freezes the first prospective value campaign for the experimental completed-shuffle
-reuse prototype. It defines an explicit deployment scenario, exact cohort, failure distribution,
-resource limits, statistical method, and economics rule before restart-speedup measurements are
-observed.
+reuse prototype before restart-speedup measurements are observed. It defines the target deployment
+scenario, exact cohort, failure distribution, run counts, resource limits, statistical method, and
+economics rule.
 
-This is an author-side experiment contract, not an Apache Spark or PMC acceptance requirement.
-Changing a threshold, cohort member, weight, supported shape, timeout policy, exclusion rule, or cost
-assumption after the campaign starts requires a new version. Historical failed or indeterminate
-evidence remains published.
+These are author-side experiment gates, not Apache Spark or PMC acceptance requirements. Changing a
+threshold, cohort member, weight, supported shape, timeout rule, exclusion rule, or cost assumption
+after performance observation requires a new version. Historical failed or indeterminate evidence
+remains published.
 
 Companions:
 
@@ -26,27 +26,27 @@ Companions:
   `7888d1e26d32e69694083e367ee6a92b28277c48`.
 - Experimental branch base used for this preregistration:
   `5f773c4669d06af57216b09748ec7d168412ad3c`.
-- The frozen Phase 0 result remains **MECHANISM_FEASIBLE / VALUE_GATE_NOT_MET**.
+- The frozen result remains **MECHANISM_FEASIBLE / VALUE_GATE_NOT_MET**.
 - The formal old value result remains **N/A** with 18 explicitly unweighted observations.
-- The reported 36.8% failure-point opportunity is a projection, and the separate 19.4% eligible
+- The reported 36.8% failure-point opportunity is a projection. The separate 19.4% eligible
   completed map-task-time share is not a measured restart speedup.
 
-Nothing in this campaign relabels or replaces that result. The new campaign measures
-failure-to-correct-result time on a later integrated real-source/real-provider candidate.
+Nothing here relabels or replaces that result. This campaign measures failure-to-correct-result time
+on a later integrated real-source/real-provider candidate.
 
-## Workload provenance and target deployment profile
+## Target deployment profile and provenance
 
 Profile id: `decision-support-snapshot-rss-v1`.
 
-The weights below are an **explicit scenario**, not production traces. No claim is made that they
-represent a particular company or deployment. If real trace weights become available later, they
-form a new prospective campaign instead of replacing these weights in place.
+The workload weights are an **explicit scenario**, not production traces. No claim is made that they
+represent a particular company or deployment. Real trace weights, if later available, require a new
+prospective campaign rather than an in-place replacement.
 
-The first concrete target pairing is:
+The target pairing is:
 
 - immutable source: Apache Iceberg tables pinned to explicit snapshot ids;
 - durable shuffle provider: Apache Celeborn as the first real remote-shuffle candidate;
-- orchestrator: Kubernetes batch application relaunch with a fresh driver and fresh executors;
+- retry mechanism: Kubernetes batch application relaunch with a fresh driver and fresh executors;
 - driver: 4 vCPU, 16 GiB memory;
 - executors: 32 pods, each 8 vCPU and 32 GiB memory;
 - worker network assumption: 10 Gbit/s;
@@ -56,20 +56,17 @@ The first concrete target pairing is:
 - retained completed-shuffle lifetime: 2 hours;
 - scenario driver-failure frequency: 1.0% of query attempts.
 
-Iceberg and Celeborn are targets, not presumed compatible implementations. If either cannot satisfy
-the later source/provider gates, the outcome is a gate failure or a new prospective profile version;
-this file is not silently retargeted.
+Iceberg and Celeborn are targets, not presumed compatible implementations. Failure of a later source
+or provider gate is a gate failure or reason for a new prospective profile; this file is not silently
+retargeted.
 
-The retry controller starts a replacement application after detecting producer-driver loss. The
-replacement uses the same immutable source snapshot request and authenticated retry lineage, but it
-receives new Spark application/attempt state, a fresh driver, fresh executors, and current shuffle
-ids. Old numeric shuffle ids are never reused as identity.
+The replacement application uses the same requested immutable source snapshots and authenticated
+retry lineage, but it receives new Spark application/attempt state, a fresh driver, fresh executors,
+and current shuffle ids. Old numeric shuffle ids are never reused as identity.
 
-## First reusable producer
+## Reusable producer and scope
 
-Exactly one exchange may be adopted in a primary query.
-
-The reusable producer grammar is frozen to:
+Exactly one exchange may be adopted in a primary query. Its child is frozen to:
 
 ```text
 certified immutable snapshot scan
@@ -79,56 +76,42 @@ certified immutable snapshot scan
   -> target exchange
 ```
 
-The producer may not contain a join, aggregate, window, subquery, runtime filter, Python/UDF/native
-expression, sampled range partitioning, or any runtime-dependent scan behavior.
+No join, partial/final aggregate, Window, subquery, runtime filter, Python/UDF/native expression,
+sampled range partitioning, or runtime-dependent scan may appear below the target exchange.
 
-Downstream consumers remain part of ordinary current Spark execution. The exact corpus deliberately
-covers grouped aggregation, a partitioned window, a single-partition global aggregate, a downstream
-sort-merge join, a later fresh shuffle, and sparse/empty-block behavior. Only the registered target
-exchange may be adopted; later exchanges execute normally.
+Downstream consumers use ordinary current Spark semantics. The exact corpus uses Window and
+sort-merge-join distribution requirements so the target exchange can retain the narrow producer
+grammar; aggregates are downstream only. Later exchanges execute fresh.
 
-Excluded queries and behaviors are:
-
-- writes and exactly-once commit recovery;
-- streaming;
-- incremental or externally delivered partial results;
-- partial-map reuse;
-- arbitrary RDD shuffle reuse;
-- joins or aggregates below the reusable producer;
-- unsupported expressions;
-- runtime-filter-dependent scans;
-- runtime-dependent source resolution;
-- sampled range partitioning;
-- cross-build reuse.
+Excluded behavior includes writes, streaming, incremental external result delivery, partial-map
+reuse, generic RDD shuffle reuse, unsupported expressions, runtime-filter-dependent scans,
+runtime-dependent source resolution, sampled range partitioning, and cross-build reuse.
 
 Any uncertainty is a cache miss. Ordinary Spark execution remains available.
 
 ## Frozen primary cohort
 
-The exact SQL and structural admission rules are in `workload-scope-v1.md`.
+Exact SQL and structural admission rules are in `workload-scope-v1.md`.
 
-| Id | Scenario weight | Target producer and downstream consumer |
+| Id | Weight | Target producer and downstream consumer |
 | --- | ---: | --- |
-| `G01` | 25% | scan/filter/project -> hash exchange -> grouped aggregate |
-| `W01` | 15% | scan/filter/project -> hash exchange -> partitioned window |
-| `S01` | 10% | scan/filter/project -> single-partition exchange -> global aggregate |
-| `J01` | 20% | fact scan/filter/project -> hash exchange -> downstream sort-merge join and aggregate |
-| `D01` | 20% | scan/filter/project -> hash exchange -> aggregate -> later fresh shuffle/consumer |
-| `E01` | 10% | selective scan/filter/project -> hash exchange -> grouped aggregate, stressing empty blocks |
+| `W01` | 20% | scan/filter/project -> hash exchange -> tenant-partitioned Window -> small result reduction |
+| `W02` | 15% | scan/filter/project -> hash exchange -> dimension-partitioned Window -> small result reduction |
+| `S01` | 10% | selective scan/filter/project -> single-partition exchange -> global Window -> small result reduction |
+| `J01` | 25% | fact scan/filter/project -> hash exchange -> sort-merge join -> global aggregate |
+| `J02` | 20% | fact scan/filter/project -> hash exchange -> sort-merge join -> later fresh aggregate shuffle |
+| `E01` | 10% | sparse scan/filter/project -> hash exchange -> Window, stressing empty blocks |
 
-The weights sum to 100%. They are fixed scenario frequencies, not measurements from the frozen
-Phase 0 corpus.
+Weights sum to 100% and are scenario frequencies, not measurements from the frozen Phase 0 corpus.
 
-Default AQE is part of the headline campaign. The campaign does not change AQE, shuffle partition,
-broadcast, or adaptive thresholds simply to manufacture a desired primary plan. AQE-disabled runs,
-forced shuffle counts, broadcast controls, join hints, repartition hints, and similar plan-shaping
-settings are **mechanism experiments only** and are excluded from value, overhead, and economics
-headline gates.
+Primary evidence uses the tested build's defaults for AQE, shuffle partition count, broadcast
+thresholds, and adaptive thresholds. AQE-disabled runs, forced shuffle counts, disabled broadcast,
+join/repartition hints, or similar plan-shaping controls are **mechanism experiments only** and are
+excluded from headline value, overhead, and economics gates.
 
-## Supported map/reducer shapes
+## Supported map/reducer envelopes
 
-Primary mapper counts come from the resolved source decomposition. The accepted envelopes are frozen
-before timing:
+Primary mapper counts come from certified source decomposition, not a benchmark-side `repartition`.
 
 | Scale | Fact bytes | Accepted M | Hash R | Single R |
 | --- | ---: | ---: | ---: | ---: |
@@ -138,120 +121,116 @@ before timing:
 | `I512` | 512 GiB +/-2% | 3,072-5,120 | 200 | 1 |
 
 The 200 hash reducers are the ordinary default initial shuffle partition count in the frozen Spark
-lineage; the campaign does not set that value. AQE stays enabled and may coalesce or otherwise change
-read partition specs after materialization. Those final specs are recorded evidence rather than
-forced back to R.
+lineage; the campaign does not set that value. AQE stays enabled and may change read partition specs
+after materialization. Those final specs are recorded evidence, not forced back to R.
 
-A row whose source decomposition or initial reducer count falls outside its registered envelope is
-`NOT_APPLICABLE`. Settings are not changed after observing performance to make it fit.
-
-Mechanism-only forced probes may include 8,192 x 1,024 and 4,096 x 2,048. They never enter the
-primary aggregate.
+A row outside its registered source-decomposition or initial-reducer envelope is
+`NOT_APPLICABLE`; settings are not changed after observing performance to make it fit. Mechanism-only
+forced probes may include 8,192 x 1,024 and 4,096 x 2,048, but never enter the primary aggregate.
 
 ## Independent failure-free pilot and failure points
 
-No restart-speedup pilot is used to choose the cohort or thresholds.
+No restart-speedup pilot is used to choose the cohort, weights, or thresholds.
 
-Failure-point structure is selected from the already frozen, independent, failure-free Phase 0-A
-opportunity campaign:
+Failure-point structure comes from the already frozen independent Phase 0-A benchmark execution:
 
 - GitHub Actions run `33963836467`;
 - artifact id `9969032965`;
 - artifact digest
   `sha256:15bb5b3c2ebfbfa565c95163c9a2644cd9a147971f39c62d23583a84f6090013`.
 
-That run predates this campaign and measured completed-shuffle opportunity rather than replacement
-restart acceleration. Its only role here is to show that stage-relative early, middle, and late
-failure landmarks are broadly applicable. Its performance percentages do not enter this campaign's
-effect estimate, weights, confidence interval, or economics.
+The benchmark queries themselves completed without injected driver failures; the workflow's overall
+failure was a disclosed post-measurement stale corpus-id validator. The run predates this campaign
+and measured opportunity, not replacement restart acceleration. It is used **only** to justify
+stage-relative early/middle/late failure landmarks. Its opportunity percentages do not enter this
+campaign's effect estimate, weights, confidence interval, or economics.
 
-Conditional on a driver failure, the frozen failure distribution is:
+Conditional on driver failure:
 
-| Id | Conditional weight | Injection rule |
+| Id | Weight | Injection rule |
 | --- | ---: | --- |
-| `F0` | 25% | producer computation completed but durable publication is not yet visible |
-| `F1` | 30% | durable publication is visible and no material downstream post-exchange stage completed |
-| `F2` | 30% | the first material downstream stage after the target exchange completed |
+| `F0` | 25% | producer completed but durable publication is not yet visible |
+| `F1` | 30% | durable publication visible; no material downstream post-exchange stage completed |
+| `F2` | 30% | first material downstream stage after target exchange completed |
 | `F3` | 15% | immediately before the final material downstream stage is launched |
 
-`F0` is the required pre-publication negative control. Recovery must miss and fall back normally. A
-pre-publication trial is never dropped because it cannot reuse the artifact.
+`F0` is the pre-publication negative control. Recovery must miss and fall back; that trial is never
+dropped merely because reuse is impossible.
 
-A structural, failure-free admission pilot may verify exact source decomposition and stage
-landmarks. It must not collect or use restart timing. If a query shape cannot expose a required
-landmark, that cell is `NOT_APPLICABLE` before performance execution and its scenario weight is not
-redistributed. More than 5% total scenario mass not applicable makes the campaign
-**INDETERMINATE**.
+A structural failure-free admission pilot may verify source decomposition, physical-plan shape, and
+stage landmarks, but it must not collect or use restart timing. A cell lacking its registered
+landmark is `NOT_APPLICABLE` before performance execution and its weight is not redistributed. More
+than 5% total scenario mass not applicable makes the campaign **INDETERMINATE**.
 
 ## Timing boundary
 
-Primary restart time is **failure-to-correct-result** wall-clock time.
+Primary restart time is **failure-to-correct-result** wall-clock time. It starts when the benchmark
+controller injects driver failure and ends only after the replacement execution has produced the
+complete result and the controller has verified row count and deterministic digest against the
+failure-free control.
 
-The timer starts when the benchmark controller injects driver failure and ends only after the
-replacement execution has produced the complete correct result and the controller has verified row
-count and deterministic digest against its failure-free control result.
-
-The timer includes, as applicable:
+Timing includes, as applicable:
 
 - failure detection;
 - orchestration and retry delay;
 - Kubernetes pod allocation;
-- driver and executor startup;
+- driver/executor startup;
 - source resolution;
 - planning and AQE planning;
 - recovery eligibility/identity work;
 - discovery and lookup;
 - provider metadata paging;
 - claim/binding;
-- recovery reads;
-- shuffle fetch;
+- recovery reads and shuffle fetch;
 - downstream execution;
 - result verification.
 
 No detection, allocation, planning, lookup, or read time is subtracted from the recovery arm.
 
-## Trial count, pairing, order, cache warmth, and outliers
+## Run count, pairing, randomized order, cache warmth and outliers
 
 Each applicable `(cohort id, input scale, failure point)` cell uses **12 paired repetitions**. A pair
-contains one ordinary-control attempt and one recovery-enabled attempt against the same source
-snapshots, data scale, cluster shape, and failure landmark.
+contains one ordinary-control attempt and one recovery-enabled attempt against the same snapshots,
+data scale, cluster shape, and failure landmark.
+
+There are 6 workloads x 4 input scales x 4 failure points = **96 registered cells**. If all cells are
+applicable, the primary campaign therefore contains **1,152 pairs / 2,304 timed attempts**.
 
 Pair order is block-randomized with seed `557003`, with six control-first and six recovery-first pairs
 per complete cell. The exact generated order is retained in campaign artifacts.
 
-The primary campaign uses natural backend cache warmth:
+Primary cache policy is natural backend warmth:
 
 - no manual source-cache or provider-page-cache flush between paired attempts;
-- randomized pair order prevents systematically assigning warmth to one arm;
+- randomized order prevents assigning warmth systematically to one arm;
 - each failed producer and replacement uses fresh driver/executor processes;
 - externally observable provider/source cache state is recorded;
-- a separately labelled cold-provider-cache sensitivity run may be reported but cannot replace the
-  primary result.
+- a labelled cold-provider-cache sensitivity run may be reported but cannot replace primary results.
 
 There is **no statistical outlier deletion, trimming, winsorization, or "obviously slow" rerun**. A
-harness failure may invalidate a run only under a predeclared external-health rule, such as inability
-to allocate the configured worker count before failure injection. The invalid raw record is retained,
-and any replacement gets a new attempt id.
+harness failure may invalidate a run only under a predeclared external-health condition, such as
+failure to allocate the configured worker count before injection. The invalid raw record remains
+published and any replacement gets a new attempt id.
 
-## Misses, failures, timeouts, and missing data
+## Misses, failures, timeouts and missing data
 
-The hard per-attempt timeout is **1,800 seconds**.
+Hard per-attempt timeout: **1,800 seconds**.
 
-Recovery misses are part of the recovery arm. A safe miss that recomputes normally is not missing
-data and cannot be excluded from the speedup distribution.
+Recovery misses remain in the recovery arm. A safe miss that recomputes normally is not missing data
+and cannot be excluded from the speedup distribution.
 
-Predetermined reporting rules are:
+Predetermined rules:
 
-- recovery times out or fails to produce a correct result while control succeeds: assign recovery
-  the 1,800-second timeout for the primary timing effect and record the reason;
-- control times out or fails while recovery succeeds: give the pair no positive speedup credit,
-  report it separately, and count it against the control reliability gate;
-- both arms fail or time out: give the pair no speedup credit and count it against reliability;
-- result digest or row-count mismatch: correctness failure; the campaign cannot PASS;
+- recovery times out/fails while control succeeds: assign recovery 1,800 seconds for the primary
+  timing effect and retain the concrete failure reason;
+- control times out/fails while recovery succeeds: no positive speedup credit; report separately and
+  count against control reliability;
+- both arms fail/time out: no speedup credit; report and count against reliability;
+- result digest or row-count mismatch: correctness failure; campaign cannot PASS;
 - provider/manifest uncertainty, timeout, malformed metadata, authorization failure, or ordinary
-  recovery rejection: safe miss; retain the full observed recovery time;
-- missing required timing or correctness evidence for a non-harness reason: campaign is
-  INDETERMINATE unless one of the rules above classifies the raw failure.
+  recovery rejection: safe miss; retain full observed recovery time;
+- required timing/correctness evidence missing for a non-harness reason: campaign is INDETERMINATE
+  unless classified by a rule above.
 
 The campaign cannot PASS if more than 1% of ordinary-control trials fail to reach a correct result,
 or if any recovery trial produces a wrong result.
@@ -260,71 +239,60 @@ or if any recovery trial produces a wrong result.
 
 For each valid pair, let `T_control` and `T_recovery` be failure-to-correct-result time.
 
-The headline aggregate improvement is:
+Headline improvement:
 
 ```text
 1 - weighted_sum(T_recovery) / weighted_sum(T_control)
 ```
 
-Weights are the product of frozen cohort weight and conditional failure-point weight. Input scales
-are reported individually and in an equal-scale aggregate; scale weights are not inferred from
-observed performance.
+Weights are frozen cohort weight x conditional failure-point weight. Input scales are reported
+individually and in an equal-scale aggregate; scale weights are not inferred from observed results.
 
-The 95% confidence interval is a deterministic paired, stratified cluster bootstrap:
+The 95% interval is a deterministic paired, stratified cluster bootstrap:
 
 1. workload ids are top-level resampling clusters;
-2. within each selected workload id, paired repetitions are resampled within failure-point and input
-   scale strata;
-3. frozen scenario weights are reapplied on every resample;
-4. 10,000 bootstrap resamples are used;
-5. bootstrap seed is `55003`;
+2. paired repetitions are resampled within failure-point and input-scale strata;
+3. frozen scenario weights are reapplied each resample;
+4. 10,000 resamples;
+5. bootstrap seed `55003`;
 6. physical exchanges are never treated as IID observations.
 
 Raw paired observations, bootstrap input, seed, and rendered interval are retained as evidence.
 
 ## Prospective value and overhead gates
 
-The author-side gates are frozen before execution.
-
 ### Restart benefit
 
-PASS requires both:
+PASS requires:
 
 - aggregate failure-to-correct-result improvement >= **20%**; and
-- lower bound of the paired 95% confidence interval **> 0%**.
+- lower 95% confidence bound **> 0%**.
 
-A positive point estimate with a non-positive lower bound does not pass. The threshold is not changed
-after observing results.
+A positive point estimate with a non-positive lower bound does not pass.
 
 ### Disabled-path overhead
 
-The recovery-disabled candidate is compared against the frozen upstream baseline build
-`2a7cfea06ba135cf0ddc62902eb0daf5a835c672` on the same backend, source snapshot, JVM/compiler,
-cluster shape, no-failure corpus, and randomized paired order.
-
-The upper bound of the paired 95% confidence interval on runtime overhead must be <= **1%**.
+Compare the recovery-disabled candidate with frozen upstream
+`2a7cfea06ba135cf0ddc62902eb0daf5a835c672` on the same backend, source snapshots,
+JVM/compiler, cluster shape, no-failure corpus, and randomized paired order. Upper 95% confidence
+bound on runtime overhead must be <= **1%**.
 
 ### Enabled all-miss overhead
 
-Recovery is enabled, but every lookup reaches a naturally absent or incompatible candidate through
-predeclared identity/source conditions. No correctness validation is weakened and no provider
-shortcut is added to manufacture a miss.
-
-Relative to the same candidate with recovery disabled, the upper 95% confidence bound on no-failure
-runtime overhead must be <= **5%**.
+Enable recovery but use predeclared naturally absent/incompatible candidates. Do not weaken
+validation or add a provider shortcut to manufacture a miss. Relative to the same candidate with
+recovery disabled, upper 95% confidence bound on no-failure runtime overhead must be <= **5%**.
 
 ### Publication / no-failure overhead
 
-The query successfully publishes a reusable completed exchange but no driver failure is injected.
-Relative to the same candidate with recovery disabled, the upper 95% confidence bound on no-failure
-runtime overhead must be <= **5%**.
+Successfully publish a reusable completed exchange without injecting driver failure. Relative to the
+same candidate with recovery disabled, upper 95% confidence bound on no-failure runtime overhead must
+be <= **5%**.
 
-All overhead campaigns use the same backend and primary corpus. A mechanism-only forced plan cannot
-substitute for the default-AQE result.
+All overhead campaigns use the same backend and primary corpus. Mechanism-only forced plans cannot
+substitute for default-AQE results.
 
 ## Resource and provider-index limits
-
-The value campaign is valid only inside these prospective limits:
 
 | Resource | Limit |
 | --- | ---: |
@@ -338,23 +306,19 @@ The value campaign is valid only inside these prospective limits:
 | recovery lookup deadline | 3 seconds |
 | total pre-scheduler recovery preparation deadline | 10 seconds |
 | concurrent provider reads per replacement query | 128 |
-| retained shuffle artifact bytes per query | 256 GiB |
+| retained shuffle artifact bytes per query | 512 GiB |
 | retention | 2 hours |
-| retained artifact byte-hours per query | 512 GiB-hours |
+| retained artifact byte-hours per query | 1,024 GiB-hours |
 
-Provider-index bytes are measured and charged separately from shuffle payload bytes. A provider that
-stores extra durable routing/index metadata must report those bytes; they cannot be hidden inside
-"service overhead".
+Provider-index bytes are charged separately from shuffle payload bytes. Extra durable routing/index
+metadata must be reported, not hidden inside service overhead. These are prospective campaign limits,
+not claims that the current implementation already enforces them. A later implementation unable to
+operate safely inside them fails the profile or requires a new prospective version.
 
-These are campaign limits, not a claim that the current implementation already enforces every
-budget. A later implementation that cannot operate safely within them fails the registered profile
-or requires a new prospective version.
+## Cost model and deployment economics
 
-## Cost model and deployment-economics gate
-
-All economics are reported in **scenario USD** so compute, memory, durable storage, traffic, and
-provider infrastructure share one unit. These rates are frozen planning assumptions, not vendor
-quotes:
+All economics use **scenario USD** so compute, memory, durable storage, traffic, and provider
+infrastructure share one unit. Rates are planning assumptions, not vendor quotes:
 
 | Cost item | Scenario rate |
 | --- | ---: |
@@ -364,7 +328,7 @@ quotes:
 | incremental provider read traffic/service | $0.010 per GiB |
 | incremental provider write traffic/service | $0.010 per GiB |
 
-For every query attempt, record:
+For every query attempt record:
 
 ```text
 control compute cost
@@ -377,16 +341,16 @@ retained index GiB-hours
 incremental provider bytes read on recovery
 ```
 
-Ordinary shuffle writes are reported but are **not double-counted** as a recovery feature cost when
-an already deployed durable provider would have written those bytes anyway. Publication write cost
-charges only bytes/service work introduced specifically to make the artifact reusable. If the
-provider can retain already-written immutable blocks without copying, that incremental copy-byte
-charge is zero and the retention/index/service cost remains visible.
+Ordinary shuffle writes are reported but are **not double-counted** as a recovery cost when an
+already deployed durable provider would have written those bytes anyway. Publication write cost
+charges only bytes/service work introduced to make the artifact reusable. If already-written
+immutable blocks can simply be retained, incremental copy-byte cost is zero while retention,
+index, and service cost remain visible.
 
 Conditional-on-failure benefit is converted to expected per-query benefit using the frozen 1.0%
 driver-failure frequency.
 
-For an already deployed compatible durable provider:
+For an already deployed compatible provider:
 
 ```text
 net_incremental_value =
@@ -398,19 +362,19 @@ net_incremental_value =
   - measured incremental provider service cost
 ```
 
-The deployment-economics gate requires `net_incremental_value > 0` and a lower 95% confidence bound
+The deployment-economics gate requires `net_incremental_value > 0` and lower 95% confidence bound
 above zero under frozen scenario weights.
 
 The cost of **introducing** durable shuffle storage is reported separately as
 `greenfield_introduction_cost`: required provider nodes/disks, reserved capacity, control-plane
-service cost, and amortized setup/operations cost in scenario USD. The report must show both:
+service cost, and amortized setup/operations cost in scenario USD. The final report shows both:
 
 1. economics when a compatible durable provider already exists; and
 2. economics when durable storage must be introduced for this feature.
 
 A positive existing-provider result may not be presented as positive greenfield economics.
 
-## Change control and decision rules
+## Change control and decisions
 
 Once any primary performance timing is observed, these cannot change in place:
 
@@ -425,10 +389,10 @@ Once any primary performance timing is observed, these cannot change in place:
 - value/overhead/economics thresholds;
 - scenario cost rates.
 
-A material change creates `v2` or later and is prospective. The v1 raw data and decision remain
-published even if a later design is better.
+A material change creates `v2` or later and is prospective. v1 raw data and its decision remain
+published.
 
-Decision values are:
+Decision values:
 
 - `PASS`: every correctness, restart-benefit, overhead, resource, and economics requirement passes;
 - `FAIL`: a preregistered threshold is missed or a correctness/resource requirement is violated;
