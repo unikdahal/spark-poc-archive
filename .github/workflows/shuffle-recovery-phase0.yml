@@ -129,7 +129,12 @@ jobs:
             code=true
           fi
 
-          echo "mode=${REQUESTED_MODE}" >> "${GITHUB_OUTPUT}"
+          effective_mode="${REQUESTED_MODE}"
+          if [[ "${evidence_docs}" == "true" && "${effective_mode}" == "focused" ]]; then
+            effective_mode=full
+          fi
+
+          echo "mode=${effective_mode}" >> "${GITHUB_OUTPUT}"
           echo "core=${core}" >> "${GITHUB_OUTPUT}"
           echo "cold=${cold}" >> "${GITHUB_OUTPUT}"
           echo "opportunity=${opportunity}" >> "${GITHUB_OUTPUT}"
