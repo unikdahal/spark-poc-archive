@@ -47,7 +47,8 @@
     ],
     "excludedBelowProducer": [
       "join",
-      "aggregate",
+      "partial aggregate",
+      "final aggregate",
       "window",
       "runtime filter",
       "subquery",
@@ -65,34 +66,34 @@
   },
   "cohort": [
     {
-      "id": "G01",
-      "weight": 0.25,
-      "shape": "scan/filter/project -> hash exchange -> grouped aggregate"
+      "id": "W01",
+      "weight": 0.20,
+      "shape": "scan/filter/project -> hash exchange -> tenant-partitioned Window -> small result reduction"
     },
     {
-      "id": "W01",
+      "id": "W02",
       "weight": 0.15,
-      "shape": "scan/filter/project -> hash exchange -> partitioned window"
+      "shape": "scan/filter/project -> hash exchange -> dimension-partitioned Window -> small result reduction"
     },
     {
       "id": "S01",
       "weight": 0.10,
-      "shape": "scan/filter/project -> single-partition exchange -> global aggregate"
+      "shape": "selective scan/filter/project -> single-partition exchange -> global Window -> small result reduction"
     },
     {
       "id": "J01",
-      "weight": 0.20,
-      "shape": "fact scan/filter/project -> hash exchange -> downstream sort-merge join and aggregate"
+      "weight": 0.25,
+      "shape": "fact scan/filter/project -> hash exchange -> sort-merge join -> global aggregate"
     },
     {
-      "id": "D01",
+      "id": "J02",
       "weight": 0.20,
-      "shape": "scan/filter/project -> hash exchange -> aggregate -> later fresh shuffle/consumer"
+      "shape": "fact scan/filter/project -> hash exchange -> sort-merge join -> later fresh aggregate shuffle"
     },
     {
       "id": "E01",
       "weight": 0.10,
-      "shape": "selective scan/filter/project -> hash exchange -> grouped aggregate, stressing empty blocks"
+      "shape": "sparse scan/filter/project -> hash exchange -> Window, stressing empty blocks"
     }
   ],
   "failurePoints": [
@@ -187,6 +188,9 @@
   },
   "trialPolicy": {
     "pairedRepetitionsPerCell": 12,
+    "registeredCellCount": 96,
+    "allApplicablePairCount": 1152,
+    "allApplicableTimedAttemptCount": 2304,
     "cellDimensions": ["cohort id", "input scale", "failure point"],
     "randomizationSeed": 557003,
     "hardTimeoutSeconds": 1800,
