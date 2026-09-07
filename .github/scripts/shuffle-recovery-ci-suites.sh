@@ -54,8 +54,8 @@ if [[ "${module}" == core ]]; then
   fi
 
   if [[ "${attempt_lifecycle}" == true ]]; then
-    # The current experimental tree has no attempt-context implementation suite yet. The provider
-    # and scheduler-adoption regressions are the directly integrated lifecycle boundaries today.
+    # Attempt/lifecycle changes cross the provider binding and scheduler-adoption boundaries, so
+    # both integrated regressions are required.
     add_suite org.apache.spark.shuffle.ReferenceShuffleProviderSuite
     add_suite org.apache.spark.shuffle.ShuffleRecoverySchedulerAdoptionSuite
   fi
