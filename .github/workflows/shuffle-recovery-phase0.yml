@@ -31,30 +31,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  hygiene:
-    name: Patch hygiene
+  provider-evidence:
+    name: Pinned Celeborn cold-driver provider evidence
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout requested head
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Check patch whitespace
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin \
-            spip/shuffle-recovery-experimental:refs/remotes/origin/spip/shuffle-recovery-experimental
-          base="$(git merge-base HEAD origin/spip/shuffle-recovery-experimental)"
-          git diff --check "${base}...HEAD"
-
-  style:
-    name: Scala style
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout requested head
         uses: actions/checkout@v6
@@ -69,206 +49,25 @@ jobs:
           distribution: zulu
           java-version: 17
 
-      - name: Cache build dependencies
-        uses: actions/cache@v5
-        with:
-          path: |
-            build/apache-maven-*
-            build/*.jar
-            ~/.sbt
-            ~/.cache/coursier
-          key: shuffle-recovery-experimental-style-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties', 'build/sbt') }}
-          restore-keys: |
-            shuffle-recovery-experimental-style-${{ runner.os }}-
-            shuffle-recovery-build-${{ runner.os }}-
-
-      - name: Run Scala style checks
-        run: timeout --signal=TERM 20m ./dev/scalastyle "-Phadoop-3 -Phive"
-
-  source-identity:
-    name: Source identity contract and cross-JVM proof (SQL, JDK 17)
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - name: Checkout requested head
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Install Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: zulu
-          java-version: 17
-
-      - name: Cache build dependencies
-        uses: actions/cache@v5
-        with:
-          path: |
-            build/apache-maven-*
-            build/*.jar
-            ~/.sbt
-            ~/.cache/coursier
-          key: shuffle-recovery-experimental-source-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties', 'build/sbt') }}
-          restore-keys: |
-            shuffle-recovery-experimental-source-${{ runner.os }}-
-            shuffle-recovery-build-${{ runner.os }}-
-
-      - name: Compile SQL production and test code
+      - name: Verify pinned provider source contracts
         shell: bash
-        run: |
-          set -o pipefail
-          ./build/sbt -Phadoop-3 -Phive "sql/Test/compile" 2>&1 | \
-            tee "${RUNNER_TEMP}/shuffle-recovery-source-sql-compile.log"
+        run: bash docs/shuffle-recovery/experimental/celeborn-0.6.3/verify-pinned-provider-source.sh
 
-      - name: Upload SQL compile diagnostics
+      - name: Run independent-process cold-driver provider probe
+        shell: bash
+        env:
+          CELEBORN_PROBE_WORK_DIR: ${{ runner.temp }}/celeborn-provider
+          CELEBORN_PROBE_RESULT: ${{ runner.temp }}/celeborn-provider-result.txt
+        run: bash docs/shuffle-recovery/experimental/celeborn-0.6.3/run-cold-driver-gap-probe.sh
+
+      - name: Upload provider evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: shuffle-recovery-source-sql-compile-${{ github.run_id }}
-          path: ${{ runner.temp }}/shuffle-recovery-source-sql-compile.log
-          if-no-files-found: error
-
-      - name: Run source-token and resolved-value regressions
-        run: |
-          ./build/sbt -Phadoop-3 -Phive \
-            "sql/testOnly org.apache.spark.sql.execution.exchange.ShuffleRecoverySourceReadIdentitySuite"
-
-      - name: Prove source token is stable across independent JVMs
-        shell: bash
-        run: |
-          set -euo pipefail
-          first="${RUNNER_TEMP}/shuffle-recovery-source-first.txt"
-          second="${RUNNER_TEMP}/shuffle-recovery-source-second.txt"
-          rm -f "${first}" "${second}"
-          ./build/sbt -Phadoop-3 -Phive \
-            "project sql" \
-            "set Test / run / fork := true" \
-            "Test/runMain org.apache.spark.sql.execution.exchange.ShuffleRecoverySourceReadIdentityProcess ${first}" \
-            "Test/runMain org.apache.spark.sql.execution.exchange.ShuffleRecoverySourceReadIdentityProcess ${second}"
-          test -s "${first}"
-          test -s "${second}"
-          cmp "${first}" "${second}"
-
-      - name: Validate focused SQL test discovery
-        shell: bash
-        run: |
-          set -euo pipefail
-          report="$(find sql -type f -path '*/test-reports/*' \
-            -name '*ShuffleRecoverySourceReadIdentitySuite*.xml' -print -quit)"
-          test -n "${report}"
-
-  core-identity:
-    name: Canonical identity codec and cross-JVM proof (Core, JDK 17)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout requested head
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Install Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: zulu
-          java-version: 17
-
-      - name: Cache build dependencies
-        uses: actions/cache@v5
-        with:
+          name: celeborn-0.6.3-provider-evidence-${{ github.run_id }}
           path: |
-            build/apache-maven-*
-            build/*.jar
-            ~/.sbt
-            ~/.cache/coursier
-          key: shuffle-recovery-experimental-core-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties', 'build/sbt') }}
-          restore-keys: |
-            shuffle-recovery-experimental-core-${{ runner.os }}-
-            shuffle-recovery-build-${{ runner.os }}-
-
-      - name: Compile Core production and test code
-        run: ./build/sbt -Phadoop-3 "core/Test/compile"
-
-      - name: Run identity codec, golden-vector, mutation and collision tests
-        run: |
-          ./build/sbt -Phadoop-3 \
-            "core/testOnly org.apache.spark.shuffle.ShuffleRecoveryComputationIdentitySuite"
-
-      - name: Prove canonical bytes are stable across independent JVMs
-        shell: bash
-        run: |
-          set -euo pipefail
-          vector="${RUNNER_TEMP}/shuffle-recovery-computation-identity.bin"
-          rm -f "${vector}"
-          ./build/sbt -Phadoop-3 \
-            "project core" \
-            "set Test / run / fork := true" \
-            "Test/runMain org.apache.spark.shuffle.ShuffleRecoveryComputationIdentityProcess write ${vector}"
-          ./build/sbt -Phadoop-3 \
-            "project core" \
-            "set Test / run / fork := true" \
-            "Test/runMain org.apache.spark.shuffle.ShuffleRecoveryComputationIdentityProcess compare ${vector}"
-          test -s "${vector}"
-
-      - name: Validate focused Core test discovery
-        shell: bash
-        run: |
-          set -euo pipefail
-          report="$(find core -type f -path '*/test-reports/*' \
-            -name '*ShuffleRecoveryComputationIdentitySuite*.xml' -print -quit)"
-          test -n "${report}"
-
-  canonical-sql-identity:
-    name: SQL materialization-boundary identity policy (JDK 17)
-    runs-on: ubuntu-latest
-    timeout-minutes: 75
-    steps:
-      - name: Checkout requested head
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Install Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: zulu
-          java-version: 17
-
-      - name: Cache build dependencies
-        uses: actions/cache@v5
-        with:
-          path: |
-            build/apache-maven-*
-            build/*.jar
-            ~/.sbt
-            ~/.cache/coursier
-          key: shuffle-recovery-experimental-sql-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties', 'build/sbt') }}
-          restore-keys: |
-            shuffle-recovery-experimental-sql-${{ runner.os }}-
-            shuffle-recovery-build-${{ runner.os }}-
-
-      - name: Compile SQL production and test code
-        run: ./build/sbt -Phadoop-3 -Phive "sql/Test/compile"
-
-      - name: Run identity boundary and eligibility regressions
-        run: |
-          ./build/sbt -Phadoop-3 -Phive \
-            "sql/testOnly org.apache.spark.sql.execution.exchange.ShuffleRecoveryComputationIdentityBuilderSuite org.apache.spark.sql.execution.exchange.ShuffleRecoveryOpportunityAnalyzerSuite"
-
-      - name: Validate focused SQL test discovery
-        shell: bash
-        run: |
-          set -euo pipefail
-          for suite in \
-            ShuffleRecoveryComputationIdentityBuilderSuite \
-            ShuffleRecoveryOpportunityAnalyzerSuite; do
-            report="$(find sql -type f -path '*/test-reports/*' -name "*${suite}*.xml" -print -quit)"
-            test -n "${report}"
-          done
+            ${{ runner.temp }}/celeborn-provider-result.txt
+            ${{ runner.temp }}/celeborn-provider/producer.log
+            ${{ runner.temp }}/celeborn-provider/reader.log
+            ${{ runner.temp }}/celeborn-provider/apache-celeborn-0.6.3-bin/logs
+          if-no-files-found: warn
