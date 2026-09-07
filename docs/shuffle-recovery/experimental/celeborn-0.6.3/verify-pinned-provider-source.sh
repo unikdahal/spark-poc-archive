@@ -47,6 +47,10 @@ grep -Fq 'val appSecret = createSecret()' \
   "${SOURCE}/client/src/main/scala/org/apache/celeborn/client/LifecycleManager.scala"
 grep -Fq 'applicationMetas.putIfAbsent(applicationMeta.appId(), applicationMeta);' \
   "${SOURCE}/master/src/main/java/org/apache/celeborn/service/deploy/master/clustermeta/AbstractMetaManager.java"
+grep -Fq 'registeredAppAndShuffles.remove(appId);' \
+  "${SOURCE}/master/src/main/java/org/apache/celeborn/service/deploy/master/clustermeta/AbstractMetaManager.java"
+grep -Fq 'if (shuffleIds == null || !shuffleIds.contains(shuffleId)) {' \
+  "${SOURCE}/master/src/main/scala/org/apache/celeborn/service/deploy/master/Master.scala"
 grep -Fq '| celeborn.client.application.unregister.enabled | true |' \
   "${SOURCE}/docs/configuration/client.md"
 grep -Fq '| celeborn.master.heartbeat.application.timeout | 300s |' \
@@ -55,10 +59,8 @@ grep -Fq 'SASL is leveraged by Celeborn to authenticate requests from an applica
   "${SOURCE}/docs/security.md"
 grep -Fq 'The `shared secret`, which is generated as part of application registration' \
   "${SOURCE}/docs/security.md"
-grep -Fq 'ShuffleClient sends GetReducerFileGroup to `LifecycleManager`' \
-  "${SOURCE}/docs/developers/shuffleclient.md" || \
-  grep -Fq 'sends GetReducerFileGroup to `LifecycleManager`' \
-    "${SOURCE}/docs/developers/shuffleclient.md"
+grep -Fq 'sends GetReducerFileGroup to `LifecycleManager`' \
+  "${SOURCE}/docs/developers/shuffleclient.md"
 
 # A separately deployable LifecycleManager appears on newer development branches, but it is not a
 # capability of the pinned stable release being evaluated here.
@@ -77,5 +79,7 @@ readerBootstrap=GetReducerFileGroup to LifecycleManager
 authSecretOwnership=LifecycleManager-generated; Master persists first app registration
 normalClientUnregister=true
 applicationHeartbeatTimeoutDefault=300s
+applicationLossRemovesRegisteredShuffles=true
+workerHeartbeatExpiresUnknownShuffleKeys=true
 standaloneLifecycleManagerModule=false
 EOF
