@@ -39,7 +39,6 @@ private[exchange] final case class ReferenceSnapshotScanExec(
     readOptions: Map[String, String],
     selectedObjects: Seq[String],
     splits: Seq[String],
-    rows: Seq[Int],
     retained: Boolean = true) extends LeafExecNode {
 
   override val output: Seq[Attribute] =
@@ -50,9 +49,17 @@ private[exchange] final case class ReferenceSnapshotScanExec(
       sparkContext.emptyRDD[InternalRow]
     } else {
       sparkContext
-        .parallelize(rows, splits.size)
+        .parallelize(ReferenceSnapshotScanExec.rowsForSnapshot(snapshotVersion), splits.size)
         .map(value => InternalRow(value))
     }
+  }
+}
+
+private[exchange] object ReferenceSnapshotScanExec {
+  def rowsForSnapshot(snapshotVersion: Long): Seq[Int] = snapshotVersion match {
+    case 1L => Seq(1, 2, 3)
+    case 2L => Seq(10, 20, 30)
+    case other => Seq(Math.floorMod(other, Int.MaxValue.toLong).toInt)
   }
 }
 
@@ -182,7 +189,6 @@ class ShuffleRecoverySourceReadIdentitySuite extends SharedSparkSession {
       readOptions: Map[String, String] = Map("mode" -> "strict", "case" -> "sensitive"),
       selectedObjects: Seq[String] = Seq("part-000", "part-001"),
       splits: Seq[String] = Seq("part-000:0-9", "part-001:0-9"),
-      rows: Seq[Int] = Seq(1, 2, 3),
       retained: Boolean = true): ReferenceSnapshotScanExec = {
     ReferenceSnapshotScanExec(
       sourceId = "source-8d570c7e",
@@ -194,7 +200,6 @@ class ShuffleRecoverySourceReadIdentitySuite extends SharedSparkSession {
       readOptions = readOptions,
       selectedObjects = selectedObjects,
       splits = splits,
-      rows = rows,
       retained = retained)
   }
 
@@ -224,8 +229,8 @@ class ShuffleRecoverySourceReadIdentitySuite extends SharedSparkSession {
   }
 
   test("same source name resolving to a new immutable snapshot changes token and rows") {
-    val oldPlan = scan(snapshotVersion = 1L, rows = Seq(1, 2, 3))
-    val newPlan = scan(snapshotVersion = 2L, rows = Seq(10, 20, 30))
+    val oldPlan = scan(snapshotVersion = 1L)
+    val newPlan = scan(snapshotVersion = 2L)
     val oldSnapshot = token(referenceRegistry.identify(oldPlan))
     val newSnapshot = token(referenceRegistry.identify(newPlan))
 
@@ -313,13 +318,41 @@ class ShuffleRecoverySourceReadIdentitySuite extends SharedSparkSession {
     assert(first !== changed)
   }
 
+  test("selected source adapter cannot return another registered adapter id") {
+    val otherAdapter = new ShuffleRecoverySourceReadAdapter {
+      override val planClass: Class[_ <: SparkPlan] = classOf[RangeExec]
+      override val adapterId: String = "spark.test.other-source.v1"
+
+      override def sourceToken(plan: SparkPlan): ShuffleRecoverySourceAdapterResult = {
+        ShuffleRecoverySourceAdapterResult.Unavailable
+      }
+    }
+    val selectedAdapter = new ShuffleRecoverySourceReadAdapter {
+      override val planClass: Class[_ <: SparkPlan] = classOf[ReferenceSnapshotScanExec]
+      override val adapterId: String = "spark.test.selected-source.v1"
+
+      override def sourceToken(plan: SparkPlan): ShuffleRecoverySourceAdapterResult = {
+        ShuffleRecoverySourceAdapterResult.Candidate(
+          ShuffleRecoverySourceTokenCandidate(
+            ShuffleRecoverySourceReadIdentity.CurrentTokenSchemaVersion,
+            otherAdapter.adapterId,
+            Array[Byte](1),
+            decompositionCertificate = Some(Array[Byte](2))))
+      }
+    }
+    val registry = ShuffleRecoverySourceReadIdentity.registry(
+      Seq(selectedAdapter, otherAdapter))
+
+    assert(registry.identify(scan()) === Miss(UnknownAdapter))
+  }
+
   test("adapter failure is a recovery miss and does not mutate ordinary execution") {
-    val plan = scan(rows = Seq(4, 5, 6))
+    val plan = scan()
     val throwingRegistry = ShuffleRecoverySourceReadIdentity.registry(
       Seq(new ThrowingReferenceSnapshotSourceAdapter))
 
     assert(throwingRegistry.identify(plan) === Miss(AdapterFailed))
-    assert(plan.executeCollect().map(_.getInt(0)).toSeq === Seq(4, 5, 6))
+    assert(plan.executeCollect().map(_.getInt(0)).toSeq === Seq(1, 2, 3))
   }
 
   test("untrusted token fields are bounded and fail closed before accepted-state copies") {
@@ -350,6 +383,8 @@ class ShuffleRecoverySourceReadIdentitySuite extends SharedSparkSession {
     assert(validate(valid.copy(
       diagnosticSummary = Some("x" * (bounds.maxDiagnosticSummaryBytes + 1)))) ===
       Miss(InvalidDiagnostic))
+    assert(validate(valid.copy(decompositionCertificate = null)) ===
+      Miss(InvalidDecomposition))
     assert(validate(valid.copy(decompositionCertificate = None)) ===
       Miss(DecompositionUncertified))
     assert(validate(valid.copy(decompositionCertificate = Some(Array.emptyByteArray))) ===
@@ -450,8 +485,7 @@ object ShuffleRecoverySourceReadIdentityProcess {
       filter = Some("value >= 0"),
       readOptions = Map("case" -> "sensitive", "mode" -> "strict"),
       selectedObjects = Seq("part-000", "part-001"),
-      splits = Seq("part-000:0-9", "part-001:0-9"),
-      rows = Seq(1, 2, 3))
+      splits = Seq("part-000:0-9", "part-001:0-9"))
 
     val fingerprint = registry.identify(plan) match {
       case Identified(token) =>
