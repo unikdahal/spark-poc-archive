@@ -22,7 +22,7 @@ jobs:
       - name: Checkout exact PR 43 head
         uses: actions/checkout@v6
         with:
-          ref: 4f2e4f3fda2b7027f6e78ca3e04d61fdb19a62c5
+          ref: e6a5efca82bde5764d1f51f4c514fec0afc80fc8
           fetch-depth: 0
           persist-credentials: false
       - name: Install Java 17
