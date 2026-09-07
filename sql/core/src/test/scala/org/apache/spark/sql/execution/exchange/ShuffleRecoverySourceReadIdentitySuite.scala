@@ -431,8 +431,9 @@ class ShuffleRecoverySourceReadIdentitySuite extends SharedSparkSession {
     val oversizedAscii = scan(
       selectedObjects = Seq("x" * (16 * 1024 + 1)),
       splits = Seq("split"))
+    val multibyte = 0x20ac.toChar.toString
     val oversizedUtf8 = scan(
-      selectedObjects = Seq("€" * (6 * 1024)),
+      selectedObjects = Seq(multibyte * (6 * 1024)),
       splits = Seq("split"))
 
     assert(referenceRegistry.identify(oversizedAscii) === Miss(SourceViewUnavailable))
