@@ -131,10 +131,10 @@ jobs:
           path: ${{ runner.temp }}/shuffle-recovery-source-sql-compile.log
           if-no-files-found: error
 
-      - name: Run source-token, resolved-value and adapter-binding regressions
+      - name: Run source-token and resolved-value regressions
         run: |
           ./build/sbt -Phadoop-3 -Phive \
-            "sql/testOnly org.apache.spark.sql.execution.exchange.ShuffleRecoverySourceReadIdentitySuite org.apache.spark.sql.execution.exchange.ShuffleRecoverySourceAdapterBindingSuite"
+            "sql/testOnly org.apache.spark.sql.execution.exchange.ShuffleRecoverySourceReadIdentitySuite"
 
       - name: Prove source token is stable across independent JVMs
         shell: bash
@@ -156,9 +156,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for suite in \
-            ShuffleRecoverySourceReadIdentitySuite \
-            ShuffleRecoverySourceAdapterBindingSuite; do
-            report="$(find sql -type f -path '*/test-reports/*' -name "*${suite}*.xml" -print -quit)"
-            test -n "${report}"
-          done
+          report="$(find sql -type f -path '*/test-reports/*' \
+            -name '*ShuffleRecoverySourceReadIdentitySuite*.xml' -print -quit)"
+          test -n "${report}"

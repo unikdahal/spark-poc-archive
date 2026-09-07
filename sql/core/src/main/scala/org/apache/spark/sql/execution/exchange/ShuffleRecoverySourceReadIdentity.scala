@@ -311,6 +311,9 @@ private[sql] object ShuffleRecoverySourceReadIdentity {
           allowEmpty = false)) {
       return Miss(InvalidDiagnostic)
     }
+    if (candidate.decompositionCertificate == null) {
+      return Miss(InvalidDecomposition)
+    }
 
     candidate.decompositionCertificate match {
       case None => Miss(DecompositionUncertified)
@@ -334,6 +337,7 @@ private[sql] object ShuffleRecoverySourceReadIdentity {
       bounds: ShuffleRecoverySourceTokenBounds): Boolean = {
     adapterId != null &&
       adapterId.nonEmpty &&
+      adapterId.length <= bounds.maxAdapterIdBytes &&
       utf8Length(adapterId) <= bounds.maxAdapterIdBytes &&
       adapterId.forall { ch =>
         ch >= 'a' && ch <= 'z' ||
@@ -350,6 +354,7 @@ private[sql] object ShuffleRecoverySourceReadIdentity {
     value != null && value.forall { text =>
       text != null &&
         (allowEmpty || text.nonEmpty) &&
+        text.length <= maximumBytes &&
         utf8Length(text) <= maximumBytes
     }
   }
