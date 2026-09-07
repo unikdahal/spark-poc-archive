@@ -311,6 +311,9 @@ private[sql] object ShuffleRecoverySourceReadIdentity {
           allowEmpty = false)) {
       return Miss(InvalidDiagnostic)
     }
+    if (candidate.decompositionCertificate == null) {
+      return Miss(InvalidDecomposition)
+    }
 
     candidate.decompositionCertificate match {
       case None => Miss(DecompositionUncertified)
