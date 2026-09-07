@@ -51,6 +51,22 @@ private[spark] final case class ShuffleRecoveryClaimedMapDescriptor(
     nonEmptyBlockCount: Int,
     physicalBlockBytes: Long)
 
+/**
+ * Untrusted aggregate statistics returned with a provider claim.
+ *
+ * Arrays are deliberately mutable here so the trust boundary must take ownership explicitly.
+ * Absence is distinct from an authoritative zero.
+ */
+private[spark] final case class ShuffleRecoveryClaimedStatistics(
+    totalDataSize: Option[Long],
+    bytesByReducer: Option[Array[Long]],
+    numOutputRows: Option[Long])
+
+private[spark] object ShuffleRecoveryClaimedStatistics {
+  val Unknown: ShuffleRecoveryClaimedStatistics =
+    ShuffleRecoveryClaimedStatistics(None, None, None)
+}
+
 private[spark] final case class ShuffleRecoveryClaimDescriptor(
     recoveryGroup: String,
     publishingGeneration: Long,
@@ -58,7 +74,8 @@ private[spark] final case class ShuffleRecoveryClaimDescriptor(
     providerCompatibilityId: String,
     targetShuffleId: Int,
     descriptorVersion: Int,
-    maps: Array[ShuffleRecoveryClaimedMapDescriptor])
+    maps: Array[ShuffleRecoveryClaimedMapDescriptor],
+    statistics: ShuffleRecoveryClaimedStatistics = ShuffleRecoveryClaimedStatistics.Unknown)
 
 private[spark] sealed trait ShuffleRecoveryClaimResult
 private[spark] final case class ShuffleRecoveryClaimed(
