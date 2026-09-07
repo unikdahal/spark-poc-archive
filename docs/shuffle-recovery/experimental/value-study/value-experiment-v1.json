@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specId": "shuffle-recovery-value-experiment-v1",
   "workloadScopeDocument": "workload-scope-v1.md",
+  "costModelDocument": "cost-model-v1.md",
   "lineage": {
     "upstreamBaseline": "2a7cfea06ba135cf0ddc62902eb0daf5a835c672",
     "experimentalBase": "5f773c4669d06af57216b09748ec7d168412ad3c",
@@ -10,6 +11,7 @@
   "provenance": {
     "profileKind": "explicit-scenario",
     "realTraceWeights": false,
+    "datasetGeneratorVersion": "decision-support-generator-v1",
     "historicalPilotActionsRun": 33963836467,
     "historicalPilotArtifactId": 9969032965,
     "historicalPilotArtifactSha256": "15bb5b3c2ebfbfa565c95163c9a2644cd9a147971f39c62d23583a84f6090013",
@@ -32,9 +34,12 @@
     "factInputScaleGiB": [16, 64, 256, 512],
     "nominalFactInputGiB": 256,
     "dimensionSnapshotGiB": 8,
+    "dimensionRows": 16777216,
+    "dimensionStoragePaddingBytesPerRow": 512,
     "inputSizeToleranceFraction": 0.02,
     "artifactRetentionHours": 2,
-    "conditionalDriverFailureRate": 0.01
+    "conditionalDriverFailureRate": 0.01,
+    "primaryQueryAttemptsPerHour": 20
   },
   "producerGrammar": {
     "maxAdoptedExchangesPerQuery": 1,
@@ -232,7 +237,23 @@
       "incrementalProviderWriteGiB": 0.01
     },
     "publicationAccounting": "charge only bytes and service work introduced by recovery publication; ordinary shuffle writes are reported separately and are not double-counted",
+    "greenfield": {
+      "providerWorkers": {
+        "count": 8,
+        "vCpuEach": 8,
+        "memoryGiBEach": 32
+      },
+      "controlPlane": {
+        "count": 3,
+        "vCpuEach": 2,
+        "memoryGiBEach": 4
+      },
+      "reservedDiskGiB": 24576,
+      "operationsUsdPerHour": 1.0,
+      "fixedUsdPerHour": 6.12304,
+      "fixedUsdPerQueryAtRegisteredArrivalRate": 0.306152
+    },
     "greenfieldDurableStorageIntroductionReportedSeparately": true,
-    "notes": "Planning assumptions only; not vendor quotes. Report existing-provider and greenfield introduction economics separately."
+    "notes": "Planning assumptions only; not vendor quotes. Existing-provider and greenfield introduction economics are separate decisions."
   }
 }
