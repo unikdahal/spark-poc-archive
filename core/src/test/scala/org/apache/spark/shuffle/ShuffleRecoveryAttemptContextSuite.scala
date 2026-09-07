@@ -320,7 +320,8 @@ class ShuffleRecoveryAttemptContextSuite extends SparkFunSuite {
   private def attemptContext(
       generation: Long,
       auth: ShuffleRecoveryAuthorizationContext = authorization(),
-      retentionPolicy: ShuffleRecoveryRetentionPolicy = retention()): ShuffleRecoveryAttemptContext = {
+      retentionPolicy: ShuffleRecoveryRetentionPolicy = retention()):
+      ShuffleRecoveryAttemptContext = {
     ShuffleRecoveryAttemptContext.create(
       "group",
       generation,
@@ -335,7 +336,8 @@ class ShuffleRecoveryAttemptContextSuite extends SparkFunSuite {
       authority: TestAuthority,
       auth: ShuffleRecoveryAuthorizationContext = authorization(),
       reservations: ShuffleRecoveryReservationManager = new ShuffleRecoveryReservationManager,
-      retentionPolicy: ShuffleRecoveryRetentionPolicy = retention()): ShuffleRecoveryAttemptLifecycle = {
+      retentionPolicy: ShuffleRecoveryRetentionPolicy = retention()):
+      ShuffleRecoveryAttemptLifecycle = {
     new ShuffleRecoveryAttemptLifecycle(
       attemptContext(generation, auth, retentionPolicy),
       reservations,
