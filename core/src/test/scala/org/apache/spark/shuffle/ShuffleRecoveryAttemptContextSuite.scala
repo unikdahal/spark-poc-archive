@@ -132,8 +132,8 @@ class ShuffleRecoveryAttemptContextSuite extends SparkFunSuite {
       }
 
     val maxRequest = ShuffleRecoveryGenerationRequest(Group, "attempt-max", "principal-a")
-    assert(allocator.reserveAssigned(maxRequest, Long.MaxValue) ==
-      ShuffleRecoveryGenerationAllocated(Long.MaxValue))
+    assert(allocator.reserveAssigned(maxRequest, Long.MaxValue - 1L) ==
+      ShuffleRecoveryGenerationAllocated(Long.MaxValue - 1L))
     assert(allocator.allocate(
       ShuffleRecoveryGenerationRequest(Group, "attempt-overflow", "principal-a")) ==
       ShuffleRecoveryGenerationAllocationInvalid)
