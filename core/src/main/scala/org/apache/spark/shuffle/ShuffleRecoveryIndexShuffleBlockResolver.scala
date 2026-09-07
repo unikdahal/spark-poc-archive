@@ -22,6 +22,9 @@ import java.nio.ByteBuffer
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 
+import scala.collection.mutable.ArrayBuffer
+import scala.util.control.NonFatal
+
 import org.apache.spark.{MapOutputTrackerMaster, ShuffleRecoverySchedulerAdoptionState, SparkConf}
 import org.apache.spark.SparkEnv
 import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
@@ -38,9 +41,9 @@ private[spark] final case class ShuffleRecoveryReadMetrics(
  * Feasibility-only read indirection for an adopted durable-provider shuffle.
  *
  * The scheduler installs only an immutable current-shuffle-id binding. Provider access remains on
- * the ordinary shuffle fetch thread through [[getBlockData]], never on the DAGScheduler event
- * loop. The provider can answer exact reducer ranges lazily; this resolver does not require a
- * provider-specific M x R descriptor in driver memory.
+ * shuffle fetch threads or MapOutputTracker's dedicated dispatcher, never on the DAGScheduler
+ * event loop. Exact reducer ranges are resolved lazily and no provider-specific M x R descriptor
+ * is retained in driver memory.
  */
 private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
     conf: SparkConf,
@@ -53,8 +56,18 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
       val mapperCount: Int,
       val reducerCount: Int,
       val localBindingGeneration: Long,
-      val maps: Vector[ShuffleRecoveryPreparedMap]) {
+      val maps: Vector[ShuffleRecoveryPreparedMap],
+      val capabilities: DurableShuffleRecoveryCapabilities,
+      val statistics: ShuffleRecoveryStatistics) {
     val usable = new AtomicBoolean(true)
+
+    val readCapabilities: ShuffleRecoveryReadCapabilities = ShuffleRecoveryReadCapabilities(
+      reducerAggregateStatisticsAvailable = statistics.bytesByReducer.isDefined,
+      // The provider can answer exact ranges, but the prototype deliberately does not expose
+      // mapper-local distribution as an adaptive capability. This prevents local/skew/partial-map
+      // readers from treating on-demand physical metadata as a materialized mapper distribution.
+      exactMapperLocalDistributionAvailable = false,
+      partitionSpecCompatible = true)
   }
 
   private final class RecoveredReadCounters {
@@ -78,10 +91,13 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
       mapperCount: Int,
       reducerCount: Int,
       localBindingGeneration: Long,
-      maps: Vector[ShuffleRecoveryPreparedMap]): Boolean = {
+      maps: Vector[ShuffleRecoveryPreparedMap],
+      capabilities: DurableShuffleRecoveryCapabilities,
+      statistics: ShuffleRecoveryStatistics): Boolean = {
     if (targetShuffleId < 0 || provider == null || binding == null || maps == null ||
-        binding.targetShuffleId != targetShuffleId || mapperCount < 0 || reducerCount <= 0 ||
-        localBindingGeneration <= 0L || maps.size != mapperCount ||
+        capabilities == null || statistics == null || binding.targetShuffleId != targetShuffleId ||
+        mapperCount < 0 || reducerCount <= 0 || localBindingGeneration <= 0L ||
+        maps.size != mapperCount || statistics.bytesByReducer.forall(_.size != reducerCount) ||
         maps.indices.exists(index => maps(index) == null || maps(index).mapIndex != index)) {
       false
     } else {
@@ -91,7 +107,9 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
         mapperCount,
         reducerCount,
         localBindingGeneration,
-        maps)
+        maps,
+        capabilities,
+        statistics)
       val existing = recoveredBindings.putIfAbsent(targetShuffleId, candidate)
       val installed = existing == null ||
         ((existing.provider eq provider) &&
@@ -143,13 +161,6 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
       targetShuffleId: Int): Option[ShuffleRecoveryObservedFetchFailure] =
     Option(observedFailures.get(targetShuffleId))
 
-  /**
-   * Accepts one already-classified provider callback and applies the same generation/binding fence
-   * used by the synchronous read path. This narrow package-private seam is also used by
-   * deterministic race tests; a delayed callback cannot gain authority over a newer binding because
-   * scheduler invalidation revalidates both the local generation and binding id before mutating
-   * state.
-   */
   private[shuffle] def recordObservedFailure(
       targetShuffleId: Int,
       observed: ShuffleRecoveryObservedFetchFailure): Unit = {
@@ -202,6 +213,141 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
     }
   }
 
+  private[spark] def recoveredStatistics(
+      targetShuffleId: Int): Option[(Long, ShuffleRecoveryStatistics)] = {
+    Option(recoveredBindings.get(targetShuffleId)).filter(_.usable.get()).map { recovered =>
+      (recovered.localBindingGeneration, recovered.statistics)
+    }
+  }
+
+  private[spark] def recoveredReadCapabilities(
+      targetShuffleId: Int): Option[(Long, ShuffleRecoveryReadCapabilities)] = {
+    Option(recoveredBindings.get(targetShuffleId)).filter(_.usable.get()).map { recovered =>
+      (recovered.localBindingGeneration, recovered.readCapabilities)
+    }
+  }
+
+  /**
+   * Resolves exact physical lengths for one bounded fetch range.
+   *
+   * The current Phase 1 representation permits reducer ranges only when every mapper is included.
+   * Partial mapper ranges imply skew/local/mapper-local semantics and are rejected at this final
+   * boundary. Rejection atomically abandons the adoption but never authorizes durable retirement.
+   */
+  private[spark] def queryExactBlocks(
+      query: ShuffleRecoveryExactBlockQuery): ShuffleRecoveryExactBlockQueryResult = {
+    ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery exact metadata query")
+    if (query == null || query.targetShuffleId < 0 || query.localBindingGeneration <= 0L) {
+      return ShuffleRecoveryExactBlocksUnsupported("recovered metadata query is malformed")
+    }
+    val recovered = recoveredBindings.get(query.targetShuffleId)
+    if (recovered == null || !recovered.usable.get()) {
+      return ShuffleRecoveryExactBlocksNotAdopted
+    }
+    if (recovered.localBindingGeneration != query.localBindingGeneration) {
+      return ShuffleRecoveryExactBlocksNotAdopted
+    }
+    if (query.startMapIndex != 0 || query.endMapIndex != recovered.mapperCount) {
+      invalidateUnsupportedRead(query.targetShuffleId, recovered.localBindingGeneration)
+      return ShuffleRecoveryExactBlocksUnsupported(
+        "partial mapper reads are disabled for recovered shuffles")
+    }
+    if (query.startReduceId < 0 || query.endReduceId < query.startReduceId ||
+        query.endReduceId > recovered.reducerCount) {
+      invalidateUnsupportedRead(query.targetShuffleId, recovered.localBindingGeneration)
+      return ShuffleRecoveryExactBlocksUnsupported("reducer range is outside the recovered shape")
+    }
+    val requestedBlocks = try {
+      Math.multiplyExact(
+        (query.endMapIndex - query.startMapIndex).toLong,
+        (query.endReduceId - query.startReduceId).toLong)
+    } catch {
+      case _: ArithmeticException =>
+        invalidateUnsupportedRead(query.targetShuffleId, recovered.localBindingGeneration)
+        return ShuffleRecoveryExactBlocksUnsupported("recovered metadata range overflowed")
+    }
+    if (requestedBlocks > ShuffleRecoveryExactBlockQuery.MaxRequestedBlocks) {
+      invalidateUnsupportedRead(query.targetShuffleId, recovered.localBindingGeneration)
+      return ShuffleRecoveryExactBlocksUnsupported("recovered metadata range exceeds the bound")
+    }
+
+    val blocks = new ArrayBuffer[ShuffleRecoveryExactBlock](
+      math.min(requestedBlocks, Int.MaxValue.toLong).toInt)
+    var mapIndex = query.startMapIndex
+    while (mapIndex < query.endMapIndex) {
+      if (!recovered.usable.get()) {
+        return ShuffleRecoveryExactBlocksUnavailable("recovered binding was invalidated")
+      }
+      val resolved = recovered.provider.openBoundMapForFetch(
+        recovered.binding, mapIndex, recovered.maps(mapIndex)) match {
+        case ShuffleRecoveryBoundMapOpened(value) => value
+        case ShuffleRecoveryBoundMapFailed(failureClass) =>
+          recordQueryFailure(query, recovered, mapIndex, query.startReduceId, failureClass)
+          return ShuffleRecoveryExactBlocksUnavailable("provider could not open recovered map")
+      }
+      if (resolved.numReducers != recovered.reducerCount) {
+        recordQueryFailure(
+          query, recovered, mapIndex, query.startReduceId, ShuffleRecoveryAdoptedCorrupt)
+        return ShuffleRecoveryExactBlocksUnavailable("recovered reducer shape changed")
+      }
+      var reduceId = query.startReduceId
+      while (reduceId < query.endReduceId) {
+        val metadata = try {
+          resolved.blockMetadata(reduceId)
+        } catch {
+          case NonFatal(_) =>
+            recordQueryFailure(query, recovered, mapIndex, reduceId, ShuffleRecoveryAdoptedCorrupt)
+            return ShuffleRecoveryExactBlocksUnavailable("recovered block metadata is invalid")
+        }
+        if (metadata == null || metadata.offset < 0L || metadata.length < 0L ||
+            metadata.offset > resolved.dataLength ||
+            metadata.length > resolved.dataLength - metadata.offset) {
+          recordQueryFailure(query, recovered, mapIndex, reduceId, ShuffleRecoveryAdoptedCorrupt)
+          return ShuffleRecoveryExactBlocksUnavailable("recovered block range is invalid")
+        }
+        if (metadata.length > 0L) {
+          blocks += ShuffleRecoveryExactBlock(mapIndex, reduceId, metadata.length)
+        }
+        reduceId += 1
+      }
+      mapIndex += 1
+    }
+    if (!recovered.usable.get()) {
+      ShuffleRecoveryExactBlocksUnavailable("recovered binding was invalidated during query")
+    } else {
+      ShuffleRecoveryExactBlocksAvailable(recovered.localBindingGeneration, blocks.toVector)
+    }
+  }
+
+  private def recordQueryFailure(
+      query: ShuffleRecoveryExactBlockQuery,
+      recovered: RecoveredReadBinding,
+      mapIndex: Int,
+      reduceId: Int,
+      failureClass: ShuffleRecoveryAdoptedReadFailureClass): Unit = {
+    recordObservedFailure(
+      query.targetShuffleId,
+      ShuffleRecoveryObservedFetchFailure(
+        recovered.localBindingGeneration,
+        recovered.binding.bindingId,
+        mapIndex,
+        reduceId,
+        failureClass))
+  }
+
+  private def invalidateUnsupportedRead(
+      targetShuffleId: Int,
+      localBindingGeneration: Long): Unit = {
+    Option(SparkEnv.get).foreach { env =>
+      env.mapOutputTracker match {
+        case tracker: MapOutputTrackerMaster =>
+          schedulerAdoption.invalidateUnsupportedRead(
+            tracker, targetShuffleId, localBindingGeneration)
+        case _ =>
+      }
+    }
+  }
+
   private[spark] def openBoundMapForPreparation(
       provider: DurableShuffleRecoveryProvider,
       binding: ShuffleRecoveryBinding,
@@ -222,7 +368,6 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
         }
 
       case batch: ShuffleBlockBatchId if recoveredBindings.containsKey(batch.shuffleId) =>
-        // Batched fetch is disabled until the durable contract grows an exact batch representation.
         throw new IOException("batch fetch is disabled for an adopted durable shuffle")
 
       case _ =>
@@ -274,8 +419,6 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
       throw new IOException("adopted shuffle block range is corrupt")
     }
 
-    // Invalidation wins over a read that started earlier. A task that already received a buffer is
-    // fenced at scheduler completion; one still inside this resolver is prevented from receiving A.
     if (!recovered.usable.get()) {
       recordFailure(id, recovered, ShuffleRecoveryAdoptedUnavailable)
       throw new IOException("recovered shuffle binding was invalidated during fetch")
