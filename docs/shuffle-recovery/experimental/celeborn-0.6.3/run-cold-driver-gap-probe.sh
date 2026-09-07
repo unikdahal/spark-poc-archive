@@ -116,7 +116,6 @@ cat > "${CELEBORN_HOME}/conf/celeborn-defaults.conf" <<EOF
 celeborn.master.host 127.0.0.1
 celeborn.master.port ${MASTER_PORT}
 celeborn.master.endpoints 127.0.0.1:${MASTER_PORT}
-celeborn.master.heartbeat.application.timeout 20s
 celeborn.worker.host 127.0.0.1
 celeborn.worker.storage.dirs ${STORAGE}
 celeborn.worker.disk.reserve.size 0b
@@ -176,12 +175,15 @@ timeout --signal=KILL 30s java -cp "${probe_classpath}" ColdDriverProviderProbe 
   >"${READER_LOG}" 2>&1
 reader_rc=$?
 set -e
-grep -E 'READER_STARTED|EXPECTED_DISCOVERY_GAP|UNEXPECTED_COLD_READ_SUCCESS' "${READER_LOG}" \
+grep -E 'READER_STARTED|EXPECTED_DISCOVERY_GAP|UNEXPECTED_COLD_READ|READER_SHUTDOWN' "${READER_LOG}" \
   | tee -a "${RESULT}" || true
 
-if [[ "${reader_rc}" -eq 3 ]] || grep -q 'UNEXPECTED_COLD_READ_SUCCESS' "${READER_LOG}"; then
+if [[ "${reader_rc}" -eq 3 ]] || [[ "${reader_rc}" -eq 4 ]] || \
+    grep -qE 'UNEXPECTED_COLD_READ_SUCCESS|UNEXPECTED_COLD_READ_WRONG_BYTES' "${READER_LOG}"; then
   cat "${READER_LOG}" >&2
-  fail "fresh reader unexpectedly discovered and read the old shuffle; re-evaluate the provider result"
+  fail "fresh reader consumed old or incorrect bytes; re-evaluate the provider result"
+elif [[ "${reader_rc}" -eq 0 ]] && grep -q 'EXPECTED_DISCOVERY_GAP_EMPTY_READ' "${READER_LOG}"; then
+  log "freshReaderResult=SUPPORTED_READ_API_RETURNED_EMPTY_WITHOUT_OLD_BYTES"
 elif [[ "${reader_rc}" -eq 0 ]] && grep -q 'EXPECTED_DISCOVERY_GAP' "${READER_LOG}"; then
   log "freshReaderResult=SUPPORTED_READ_API_COULD_NOT_DISCOVER_OLD_OUTPUT"
 elif [[ "${reader_rc}" -eq 124 ]] || [[ "${reader_rc}" -eq 137 ]]; then
@@ -191,15 +193,19 @@ else
   fail "reader failed outside the expected discovery-gap result (exit ${reader_rc})"
 fi
 
-# The runtime uses a shortened application heartbeat timeout only to make cleanup observable in a
-# bounded test. The pinned release's documented default is 300 seconds.
+if grep -q 'READER_SHUTDOWN=ORDERLY_CLIENT_AND_LIFECYCLE_MANAGER' "${READER_LOG}"; then
+  log "readerShutdown=ORDERLY_CLIENT_AND_LIFECYCLE_MANAGER"
+else
+  log "readerShutdown=TIMEOUT_OR_FORCED_PROCESS_TERMINATION"
+fi
+
 cleanup_deadline=$((SECONDS + 45))
 while [[ "$(file_count)" -gt 0 ]] && ((SECONDS < cleanup_deadline)); do
   sleep 1
 done
-log "artifactAfterApplicationTimeout.fileCount=$(file_count)"
-log "artifactAfterApplicationTimeout.totalBytes=$(file_bytes)"
-log "configuredApplicationHeartbeatTimeout=20s"
+log "artifactAfterReaderTermination.fileCount=$(file_count)"
+log "artifactAfterReaderTermination.totalBytes=$(file_bytes)"
+log "normalClientUnregister=true"
 log "documentedDefaultApplicationHeartbeatTimeout=300s"
 log "PROBE_RESULT=PROVIDER_GAP"
 
