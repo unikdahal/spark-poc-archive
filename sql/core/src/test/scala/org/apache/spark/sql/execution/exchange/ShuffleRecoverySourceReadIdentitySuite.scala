@@ -134,10 +134,15 @@ private[exchange] final class ReferenceSnapshotSourceAdapter
     if (entries > maxMetadataEntries || strings.exists(_ == null)) {
       false
     } else {
-      strings.foldLeft(0L) { (total, value) =>
-        val size = value.getBytes(StandardCharsets.UTF_8).length.toLong
-        if (total > maxMetadataBytes) total else total + size
-      } <= maxMetadataBytes
+      var totalBytes = 0L
+      strings.forall { value =>
+        if (value.length > maxMetadataBytes) {
+          false
+        } else {
+          totalBytes += value.getBytes(StandardCharsets.UTF_8).length.toLong
+          totalBytes <= maxMetadataBytes
+        }
+      }
     }
   }
 
@@ -419,11 +424,15 @@ class ShuffleRecoverySourceReadIdentitySuite extends SharedSparkSession {
   }
 
   test("oversized reference metadata is refused before canonical token construction") {
-    val oversized = scan(
+    val oversizedAscii = scan(
       selectedObjects = Seq("x" * (16 * 1024 + 1)),
       splits = Seq("split"))
+    val oversizedUtf8 = scan(
+      selectedObjects = Seq("€" * (6 * 1024)),
+      splits = Seq("split"))
 
-    assert(referenceRegistry.identify(oversized) === Miss(SourceViewUnavailable))
+    assert(referenceRegistry.identify(oversizedAscii) === Miss(SourceViewUnavailable))
+    assert(referenceRegistry.identify(oversizedUtf8) === Miss(SourceViewUnavailable))
   }
 
   test("resolved-value policy is explicit and keeps DPP and runtime filters unsupported") {
