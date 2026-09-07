@@ -130,6 +130,7 @@
   "primaryInputScales": [
     {
       "id": "I16",
+      "weight": 0.25,
       "factGiB": 16,
       "mapperMin": 96,
       "mapperMax": 160,
@@ -138,6 +139,7 @@
     },
     {
       "id": "I64",
+      "weight": 0.25,
       "factGiB": 64,
       "mapperMin": 384,
       "mapperMax": 640,
@@ -146,6 +148,7 @@
     },
     {
       "id": "I256",
+      "weight": 0.25,
       "factGiB": 256,
       "mapperMin": 1536,
       "mapperMax": 2560,
@@ -154,6 +157,7 @@
     },
     {
       "id": "I512",
+      "weight": 0.25,
       "factGiB": 512,
       "mapperMin": 3072,
       "mapperMax": 5120,
@@ -202,18 +206,21 @@
     "outlierDeletion": "none",
     "cacheWarmth": "natural backend warmth; no manual cache flush in primary campaign",
     "misses": "included in recovery arm",
-    "recoveryTimeout": "penalized at hard timeout when paired control reaches a correct result",
-    "baselineTimeout": "no positive speedup credit; pair reported separately and contributes to reliability gate",
-    "bothFail": "no speedup credit; reported and contributes to reliability gate",
+    "recoveryTimeoutWhenControlCorrect": "use observed control time and score recovery as 1800 seconds",
+    "controlFailureWhenRecoveryCorrect": "score both arms as 1800 seconds for zero speedup credit; retain actual recovery observation separately and count control failure against reliability",
+    "bothFail": "score both arms as 1800 seconds for zero speedup credit and count against reliability",
     "maxControlFailureFractionForPass": 0.01,
-    "notApplicableScenarioMassIndeterminateThreshold": 0.05
+    "notApplicableScenarioMassIndeterminateThreshold": 0.05,
+    "scenarioMassPerCell": "workload weight * failure-point weight * input-scale weight"
   },
   "statistics": {
     "aggregateMetric": "1 - weighted_sum(recovery failure-to-correct-result ms) / weighted_sum(control failure-to-correct-result ms)",
-    "confidence": "paired stratified cluster bootstrap by workload id with 10000 resamples",
+    "confidence": "paired stratified bootstrap over the 12 scored pairs within every fixed workload/input-scale/failure-point cell; never resample workload identities",
     "confidenceLevel": 0.95,
+    "bootstrapResamples": 10000,
     "bootstrapSeed": 55003,
-    "inputScaleAggregation": "report scales individually and use equal-scale aggregate; never infer scale weights from observed performance"
+    "scenarioComposition": "fixed workload weights * fixed failure-point weights * fixed 0.25 input-scale weights",
+    "iidUnit": "paired repetition within a fixed cell; never physical exchange, map, reducer, or block"
   },
   "gates": {
     "restartImprovementPointEstimateMin": 0.20,
