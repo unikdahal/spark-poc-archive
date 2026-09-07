@@ -20,9 +20,23 @@ set -euo pipefail
 
 VERSION="v0.6.3"
 EXPECTED_COMMIT="f583b73d292afdfeed865e20610838121c9db9cf"
-WORK="${CELEBORN_SOURCE_AUDIT_DIR:-$(mktemp -d)}"
+if [[ -n "${CELEBORN_SOURCE_AUDIT_DIR:-}" ]]; then
+  WORK="${CELEBORN_SOURCE_AUDIT_DIR}"
+  WORK_CREATED=false
+else
+  WORK="$(mktemp -d)"
+  WORK_CREATED=true
+fi
 SOURCE="${WORK}/celeborn"
 
+cleanup() {
+  if [[ "${WORK_CREATED}" == true ]]; then
+    rm -rf "${WORK}"
+  fi
+}
+trap cleanup EXIT
+
+mkdir -p "${WORK}"
 if [[ ! -d "${SOURCE}/.git" ]]; then
   git clone --quiet --filter=blob:none --no-checkout https://github.com/apache/celeborn.git "${SOURCE}"
 fi
