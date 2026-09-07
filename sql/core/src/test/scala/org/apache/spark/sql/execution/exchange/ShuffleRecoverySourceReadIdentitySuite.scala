@@ -119,28 +119,32 @@ private[exchange] final class ReferenceSnapshotSourceAdapter
   }
 
   private def boundedMetadata(scan: ReferenceSnapshotScanExec): Boolean = {
-    val strings =
-      Seq(scan.sourceId, scan.schemaFingerprint) ++
-        scan.projection ++
-        scan.filter.toSeq ++
-        scan.readOptions.iterator.flatMap { case (key, value) => Iterator(key, value) }.toSeq ++
-        scan.selectedObjects ++
-        scan.splits
     val entries =
       scan.projection.size.toLong +
         scan.readOptions.size.toLong * 2L +
         scan.selectedObjects.size.toLong +
         scan.splits.size.toLong
-    if (entries > maxMetadataEntries || strings.exists(_ == null)) {
+    if (entries > maxMetadataEntries) {
       false
     } else {
-      var totalBytes = 0L
-      strings.forall { value =>
-        if (value.length > maxMetadataBytes) {
-          false
-        } else {
-          totalBytes += value.getBytes(StandardCharsets.UTF_8).length.toLong
-          totalBytes <= maxMetadataBytes
+      val strings =
+        Seq(scan.sourceId, scan.schemaFingerprint) ++
+          scan.projection ++
+          scan.filter.toSeq ++
+          scan.readOptions.iterator.flatMap { case (key, value) => Iterator(key, value) }.toSeq ++
+          scan.selectedObjects ++
+          scan.splits
+      if (strings.exists(_ == null)) {
+        false
+      } else {
+        var totalBytes = 0L
+        strings.forall { value =>
+          if (value.length > maxMetadataBytes) {
+            false
+          } else {
+            totalBytes += value.getBytes(StandardCharsets.UTF_8).length.toLong
+            totalBytes <= maxMetadataBytes
+          }
         }
       }
     }
