@@ -358,9 +358,9 @@ private[spark] final class ShuffleRecoveryAttemptLifecycle(
     throw new IllegalArgumentException("attempt lifecycle inputs must not be null")
   }
 
-  private final case class ActiveBinding(
-      binding: ShuffleRecoveryBinding,
-      provider: ShuffleRecoveryAuthenticatedClaimProvider)
+  private final class ActiveBinding(
+      val binding: ShuffleRecoveryBinding,
+      val provider: ShuffleRecoveryAuthenticatedClaimProvider)
 
   private val bindings = mutable.LinkedHashMap.empty[String, ActiveBinding]
   private var stopped = false
@@ -560,7 +560,7 @@ private[spark] final class ShuffleRecoveryAttemptLifecycle(
           bindings.contains(binding.bindingId)) {
         false
       } else {
-        bindings.put(binding.bindingId, ActiveBinding(binding, provider))
+        bindings.put(binding.bindingId, new ActiveBinding(binding, provider))
         true
       }
     }
