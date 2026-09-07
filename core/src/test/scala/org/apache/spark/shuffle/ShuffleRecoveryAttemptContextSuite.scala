@@ -67,7 +67,8 @@ class ShuffleRecoveryAttemptContextSuite extends SparkFunSuite {
     private val finished = new ConcurrentHashMap[ShuffleRecoveryGroupKey, java.lang.Boolean]()
     val calls = new AtomicInteger(0)
 
-    override def finishGroup(groupKey: ShuffleRecoveryGroupKey): ShuffleRecoveryGroupFinishResult = {
+    override def finishGroup(
+        groupKey: ShuffleRecoveryGroupKey): ShuffleRecoveryGroupFinishResult = {
       calls.incrementAndGet()
       if (finished.putIfAbsent(groupKey, java.lang.Boolean.TRUE) == null) {
         ShuffleRecoveryGroupFinished
