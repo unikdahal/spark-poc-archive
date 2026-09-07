@@ -19,10 +19,12 @@ package org.apache.spark.shuffle
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream, DataInputStream, DataOutputStream}
 import java.io.{EOFException, IOException}
+import java.nio.{ByteBuffer, CharBuffer}
 import java.nio.charset.{CodingErrorAction, StandardCharsets}
 import java.security.MessageDigest
 import java.util.IdentityHashMap
 
+import scala.collection.mutable
 import scala.util.control.NonFatal
 
 /**
@@ -47,13 +49,13 @@ private[spark] final case class ShuffleRecoveryComputationIdentity private[shuff
     compatibility: ShuffleRecoveryCompatibility,
     parentExchangeIdentities: Vector[ShuffleRecoveryComputationIdentity]) {
 
-  private[shuffle] lazy val canonicalPayload: Vector[Byte] =
+  private[spark] lazy val canonicalPayload: Vector[Byte] =
     ShuffleRecoveryComputationIdentityCodec.encode(this).toVector
 
-  private[shuffle] lazy val digest: String =
+  private[spark] lazy val digest: String =
     ShuffleRecoveryComputationIdentityCodec.sha256Hex(canonicalPayload.toArray)
 
-  private[shuffle] lazy val lookupPrefix: String = digest.substring(0, 2)
+  private[spark] lazy val lookupPrefix: String = digest.substring(0, 2)
 }
 
 private[spark] object ShuffleRecoveryComputationIdentity {
@@ -73,6 +75,10 @@ private[spark] object ShuffleRecoveryComputationIdentity {
       compatibility: ShuffleRecoveryCompatibility,
       parentExchangeIdentities: Seq[ShuffleRecoveryComputationIdentity] = Nil)
       : ShuffleRecoveryComputationIdentity = {
+    if (sourceTokens == null || resolvedValues == null || semanticConfig == null ||
+        parentExchangeIdentities == null) {
+      throw new IllegalArgumentException("identity collections must not be null")
+    }
     val identity = ShuffleRecoveryComputationIdentity(
       outputContract,
       producer,
@@ -98,6 +104,9 @@ private[spark] object ShuffleRecoveryOutputField {
       dataType: String,
       nullable: Boolean,
       metadata: Map[String, String] = Map.empty): ShuffleRecoveryOutputField = {
+    if (metadata == null) {
+      throw new IllegalArgumentException("output metadata must not be null")
+    }
     ShuffleRecoveryOutputField(dataType, nullable, metadata.toVector.sortBy(_._1))
   }
 }
@@ -309,6 +318,8 @@ private[spark] object ShuffleRecoveryCanonicalValue {
 /** Canonical binary codec and fail-closed compatibility check for computation identities. */
 private[spark] object ShuffleRecoveryComputationIdentityCodec {
   private val Magic = 0x53524932 // SRI2
+  private val HashSeed = 42
+  private val HashCompatibilityId = "spark-murmur3-32-seed-42-v1"
 
   private[shuffle] val MaxIdentityBytes = 1024 * 1024
   private[shuffle] val MaxStringBytes = 16 * 1024
@@ -323,7 +334,7 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
   private[shuffle] val MaxDepth = 64
 
   private final class Budget {
-    var nodes: Int = 0
+    private var nodes: Int = 0
 
     def consumeNode(): Unit = {
       nodes = Math.addExact(nodes, 1)
@@ -336,8 +347,11 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
   private final class BoundedByteArrayOutputStream(maximum: Int)
       extends ByteArrayOutputStream {
     private def requireCapacity(increment: Int): Unit = {
+      if (increment < 0) {
+        throw new IllegalArgumentException("negative identity write length")
+      }
       val next = Math.addExact(count, increment)
-      if (increment < 0 || next > maximum) {
+      if (next > maximum) {
         throw new IllegalArgumentException(s"identity exceeds $maximum bytes")
       }
     }
@@ -357,29 +371,28 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
     validate(identity)
     val bytes = new BoundedByteArrayOutputStream(MaxIdentityBytes)
     val out = new DataOutputStream(bytes)
-    val budget = new Budget
-    writeIdentity(out, identity, budget, 0)
+    writeIdentity(out, identity, new Budget, depth = 0)
     out.flush()
     bytes.toByteArray
   }
 
   def decode(bytes: Array[Byte]): ShuffleRecoveryComputationIdentity = {
-    if (bytes == null || bytes.length == 0 || bytes.length > MaxIdentityBytes) {
+    if (bytes == null || bytes.isEmpty || bytes.length > MaxIdentityBytes) {
       throw new IOException("invalid computation identity size")
     }
     val in = new DataInputStream(new ByteArrayInputStream(bytes))
     try {
-      val identity = readIdentity(in, new Budget, 0)
+      val identity = readIdentity(in, new Budget, depth = 0)
       if (in.available() != 0) {
         throw new IOException("trailing computation identity bytes")
       }
       validate(identity)
       identity
     } catch {
+      case e: EOFException => throw new IOException("truncated computation identity", e)
       case e: IOException => throw e
       case e: IllegalArgumentException =>
         throw new IOException("invalid computation identity", e)
-      case _: EOFException => throw new IOException("truncated computation identity")
       case NonFatal(e) => throw new IOException("malformed computation identity", e)
     }
   }
@@ -388,8 +401,11 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
     if (identity == null) {
       throw new IllegalArgumentException("computation identity must not be null")
     }
-    val active = new IdentityHashMap[AnyRef, java.lang.Boolean]()
-    validateIdentity(identity, new Budget, active, 0)
+    validateIdentity(
+      identity,
+      new Budget,
+      new IdentityHashMap[AnyRef, java.lang.Boolean](),
+      depth = 0)
   }
 
   private def validateIdentity(
@@ -398,58 +414,54 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
       active: IdentityHashMap[AnyRef, java.lang.Boolean],
       depth: Int): Unit = {
     requireDepth(depth)
+    requireNonNull(identity.outputContract, "output contract")
+    requireNonNull(identity.producer, "producer")
+    requireNonNull(identity.partitioning, "partitioning")
+    requireNonNull(identity.mapperDecomposition, "mapper decomposition")
+    requireNonNull(identity.sourceTokens, "source tokens")
+    requireNonNull(identity.resolvedValues, "resolved values")
+    requireNonNull(identity.semanticConfig, "semantic configuration")
+    requireNonNull(identity.parentExchangeIdentities, "parent exchange identities")
     if (active.put(identity, java.lang.Boolean.TRUE) != null) {
       throw new IllegalArgumentException("cyclic parent computation identity")
     }
     try {
-      requireCollection(identity.outputContract.fields.size, MaxSourceTokens, "output fields")
-      validateText(identity.outputContract.rowEncodingVersion, "row encoding version")
-      validateText(
-        identity.outputContract.serializerCompatibilityId,
-        "serializer compatibility id")
-      validateText(identity.outputContract.codecCompatibilityId, "codec compatibility id")
-      identity.outputContract.fields.foreach { field =>
-        validateText(field.dataType, "output data type")
-        requireSortedDistinct(field.metadata.map(_._1), "output metadata")
-        field.metadata.foreach { case (key, value) =>
-          validateText(key, "output metadata key")
-          validateText(value, "output metadata value", allowEmpty = true)
-        }
-      }
+      validateOutputContract(identity.outputContract)
       validateOperator(identity.producer, budget, active, depth + 1)
       validatePartitioning(identity.partitioning, budget, active, depth + 1)
       validateMapperDecomposition(identity.mapperDecomposition)
       requireCollection(identity.sourceTokens.size, MaxSourceTokens, "source tokens")
       identity.sourceTokens.foreach(validateSourceToken)
-      requireCollection(identity.resolvedValues.size, MaxResolvedValues, "resolved values")
-      requireSortedDistinct(identity.resolvedValues.map(_._1), "resolved values")
-      identity.resolvedValues.foreach { case (key, value) =>
-        validateText(key, "resolved value key")
-        validateValue(value)
+      identity.mapperDecomposition.splits.foreach { split =>
+        if (split.sourceOrdinal >= identity.sourceTokens.size) {
+          throw new IllegalArgumentException("mapper split source ordinal has no source token")
+        }
       }
-      requireCollection(
-        identity.semanticConfig.size,
-        MaxSemanticConfigEntries,
-        "semantic configuration")
-      requireSortedDistinct(identity.semanticConfig.map(_._1), "semantic configuration")
-      identity.semanticConfig.foreach { case (key, value) =>
-        validateText(key, "semantic configuration key")
-        validateText(value, "semantic configuration value", allowEmpty = true)
-      }
+      validateResolvedValues(identity.resolvedValues)
+      validateSemanticConfig(identity.semanticConfig)
       validateCompatibility(identity.compatibility)
-      requireCollection(
-        identity.parentExchangeIdentities.size,
-        MaxParentIdentities,
-        "parent exchange identities")
-      identity.parentExchangeIdentities.foreach { parent =>
-        validateIdentity(parent, budget, active, depth + 1)
-      }
-      validateParentReferences(
-        identity.producer,
-        identity.parentExchangeIdentities.size,
-        new IdentityHashMap[ShuffleRecoveryOperatorNode, java.lang.Boolean]())
+      validateParents(identity, budget, active, depth)
     } finally {
       active.remove(identity)
+    }
+  }
+
+  private def validateOutputContract(contract: ShuffleRecoveryOutputContract): Unit = {
+    requireNonNull(contract.fields, "output fields")
+    requireCollection(contract.fields.size, MaxSourceTokens, "output fields")
+    validateText(contract.rowEncodingVersion, "row encoding version")
+    validateText(contract.serializerCompatibilityId, "serializer compatibility id")
+    validateText(contract.codecCompatibilityId, "codec compatibility id")
+    contract.fields.foreach { field =>
+      requireNonNull(field, "output field")
+      requireNonNull(field.metadata, "output metadata")
+      validateText(field.dataType, "output data type")
+      requireCollection(field.metadata.size, 128, "output metadata")
+      requireSortedDistinct(field.metadata.map(_._1), "output metadata")
+      field.metadata.foreach { case (key, value) =>
+        validateText(key, "output metadata key")
+        validateText(value, "output metadata value", allowEmpty = true)
+      }
     }
   }
 
@@ -459,9 +471,11 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
       active: IdentityHashMap[AnyRef, java.lang.Boolean],
       depth: Int): Unit = {
     requireDepth(depth)
-    if (node == null || node.kind == null) {
-      throw new IllegalArgumentException("operator node and kind must not be null")
-    }
+    requireNonNull(node, "operator node")
+    requireNonNull(node.kind, "operator kind")
+    requireNonNull(node.parameters, "operator parameters")
+    requireNonNull(node.expressions, "operator expressions")
+    requireNonNull(node.children, "operator children")
     budget.consumeNode()
     if (active.put(node, java.lang.Boolean.TRUE) != null) {
       throw new IllegalArgumentException("cyclic operator graph")
@@ -480,9 +494,31 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
           throw new IllegalArgumentException("negative parent exchange index")
         case _ => throw new IllegalArgumentException("unsupported operator child")
       }
+      validateOperatorShape(node)
     } finally {
       active.remove(node)
     }
+  }
+
+  private def validateOperatorShape(node: ShuffleRecoveryOperatorNode): Unit = node.kind match {
+    case ShuffleRecoveryOperatorKind.Project =>
+      requireExact(node.parameters.isEmpty, "project operator parameters")
+      requireExact(node.children.size == 1, "project operator child count")
+    case ShuffleRecoveryOperatorKind.Filter =>
+      requireExact(node.parameters.isEmpty, "filter operator parameters")
+      requireExact(node.expressions.size == 1, "filter operator expression count")
+      requireExact(node.children.size == 1, "filter operator child count")
+    case ShuffleRecoveryOperatorKind.RangeSource =>
+      requireExact(node.expressions.isEmpty, "range source expressions")
+      requireExact(node.children.isEmpty, "range source children")
+      node.parameters match {
+        case Vector(
+            _: ShuffleRecoveryLongValue,
+            _: ShuffleRecoveryLongValue,
+            ShuffleRecoveryLongValue(step),
+            ShuffleRecoveryIntValue(slices)) if step != 0L && slices > 0 =>
+        case _ => throw new IllegalArgumentException("invalid range source parameters")
+      }
   }
 
   private def validateExpression(
@@ -491,9 +527,10 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
       active: IdentityHashMap[AnyRef, java.lang.Boolean],
       depth: Int): Unit = {
     requireDepth(depth)
-    if (expression == null || expression.kind == null) {
-      throw new IllegalArgumentException("expression node and kind must not be null")
-    }
+    requireNonNull(expression, "expression node")
+    requireNonNull(expression.kind, "expression kind")
+    requireNonNull(expression.parameters, "expression parameters")
+    requireNonNull(expression.children, "expression children")
     budget.consumeNode()
     if (active.put(expression, java.lang.Boolean.TRUE) != null) {
       throw new IllegalArgumentException("cyclic expression graph")
@@ -504,8 +541,36 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
       expression.parameters.foreach(validateValue)
       requireCollection(expression.children.size, 64, "expression children")
       expression.children.foreach(validateExpression(_, budget, active, depth + 1))
+      validateExpressionShape(expression)
     } finally {
       active.remove(expression)
+    }
+  }
+
+  private def validateExpressionShape(expression: ShuffleRecoveryExpressionNode): Unit = {
+    import ShuffleRecoveryExpressionKind._
+    expression.kind match {
+      case Literal =>
+        requireExact(expression.parameters.size == 1, "literal parameter count")
+        requireExact(expression.children.isEmpty, "literal child count")
+      case Input =>
+        expression.parameters match {
+          case Vector(ShuffleRecoveryIntValue(ordinal)) if ordinal >= 0 =>
+          case _ => throw new IllegalArgumentException("invalid input ordinal")
+        }
+        requireExact(expression.children.isEmpty, "input child count")
+      case Alias =>
+        requireExact(expression.parameters.isEmpty, "alias parameters")
+        requireExact(expression.children.size == 1, "alias child count")
+      case EqualTo | EqualNullSafe | GreaterThan | GreaterThanOrEqual |
+          LessThan | LessThanOrEqual | And | Or =>
+        requireExact(expression.parameters.isEmpty, "binary expression parameters")
+        requireExact(expression.children.size == 2, "binary expression child count")
+      case Not | IsNull | IsNotNull =>
+        requireExact(expression.parameters.isEmpty, "unary expression parameters")
+        requireExact(expression.children.size == 1, "unary expression child count")
+      case Add | Subtract | Multiply | Pmod | Murmur3Hash =>
+        throw new IllegalArgumentException("expression kind is not admitted by identity version 2")
     }
   }
 
@@ -514,14 +579,17 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
       budget: Budget,
       active: IdentityHashMap[AnyRef, java.lang.Boolean],
       depth: Int): Unit = partitioning match {
-    case ShuffleRecoveryHashPartitioning(count, expressions, _, compatibilityId) =>
+    case ShuffleRecoveryHashPartitioning(count, expressions, seed, compatibilityId) =>
       if (count <= 0 || count > ShuffleRecoveryManifestCodec.MaxReducers) {
         throw new IllegalArgumentException("invalid hash partition count")
       }
-      validateText(compatibilityId, "hash compatibility id")
-      if (expressions.isEmpty) {
+      if (seed != HashSeed || compatibilityId != HashCompatibilityId) {
+        throw new IllegalArgumentException("unsupported hash partitioning compatibility")
+      }
+      if (expressions == null || expressions.isEmpty) {
         throw new IllegalArgumentException("hash partitioning requires expressions")
       }
+      requireCollection(expressions.size, 1024, "hash expressions")
       expressions.foreach(validateExpression(_, budget, active, depth))
     case ShuffleRecoverySinglePartition =>
     case _ => throw new IllegalArgumentException("unsupported recovery partitioning")
@@ -529,15 +597,15 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
 
   private def validateMapperDecomposition(
       decomposition: ShuffleRecoveryMapperDecomposition): Unit = {
-    if (decomposition == null || decomposition.mapperCount < 0 ||
-        decomposition.mapperCount > MaxMaps) {
-      throw new IllegalArgumentException("invalid mapper count")
+    if (decomposition.mapperCount < 0 || decomposition.mapperCount > MaxMaps ||
+        decomposition.splits == null) {
+      throw new IllegalArgumentException("invalid mapper decomposition")
     }
     if (decomposition.splits.size != decomposition.mapperCount) {
       throw new IllegalArgumentException("mapper split count must equal mapper count")
     }
     decomposition.splits.foreach { split =>
-      if (split.sourceOrdinal < 0 || split.sourcePartitionOrdinal < 0 ||
+      if (split == null || split.sourceOrdinal < 0 || split.sourcePartitionOrdinal < 0 ||
           split.descriptorVersion <= 0) {
         throw new IllegalArgumentException("invalid mapper split descriptor")
       }
@@ -552,10 +620,30 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
     validateBytes(token.payload, MaxTokenBytes, "source token")
   }
 
-  private def validateCompatibility(compatibility: ShuffleRecoveryCompatibility): Unit = {
-    if (compatibility == null) {
-      throw new IllegalArgumentException("compatibility must not be null")
+  private def validateResolvedValues(
+      resolvedValues: Vector[(String, ShuffleRecoveryCanonicalValue)]): Unit = {
+    requireCollection(resolvedValues.size, MaxResolvedValues, "resolved values")
+    requireSortedDistinct(resolvedValues.map(_._1), "resolved values")
+    resolvedValues.foreach { case (key, value) =>
+      validateText(key, "resolved value key")
+      validateValue(value)
     }
+  }
+
+  private def validateSemanticConfig(semanticConfig: Vector[(String, String)]): Unit = {
+    requireCollection(
+      semanticConfig.size,
+      MaxSemanticConfigEntries,
+      "semantic configuration")
+    requireSortedDistinct(semanticConfig.map(_._1), "semantic configuration")
+    semanticConfig.foreach { case (key, value) =>
+      validateText(key, "semantic configuration key")
+      validateText(value, "semantic configuration value", allowEmpty = true)
+    }
+  }
+
+  private def validateCompatibility(compatibility: ShuffleRecoveryCompatibility): Unit = {
+    requireNonNull(compatibility, "compatibility")
     validateText(compatibility.sparkCompatibilityId, "Spark compatibility id")
     validateText(compatibility.shuffleWriteFormatId, "shuffle write format id")
     validateText(compatibility.providerReadFormatId, "provider read format id")
@@ -581,19 +669,44 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
     case _ => throw new IllegalArgumentException("unsupported canonical value")
   }
 
-  private def validateParentReferences(
+  private def validateParents(
+      identity: ShuffleRecoveryComputationIdentity,
+      budget: Budget,
+      active: IdentityHashMap[AnyRef, java.lang.Boolean],
+      depth: Int): Unit = {
+    requireCollection(
+      identity.parentExchangeIdentities.size,
+      MaxParentIdentities,
+      "parent exchange identities")
+    identity.parentExchangeIdentities.foreach { parent =>
+      validateIdentity(parent, budget, active, depth + 1)
+    }
+    val referenced = mutable.BitSet.empty
+    collectParentReferences(
+      identity.producer,
+      identity.parentExchangeIdentities.size,
+      referenced,
+      new IdentityHashMap[ShuffleRecoveryOperatorNode, java.lang.Boolean]())
+    if (referenced != mutable.BitSet((0 until identity.parentExchangeIdentities.size): _*)) {
+      throw new IllegalArgumentException("parent identity list contains an unreferenced entry")
+    }
+  }
+
+  private def collectParentReferences(
       node: ShuffleRecoveryOperatorNode,
       parentCount: Int,
+      referenced: mutable.BitSet,
       seen: IdentityHashMap[ShuffleRecoveryOperatorNode, java.lang.Boolean]): Unit = {
     if (seen.put(node, java.lang.Boolean.TRUE) != null) {
       return
     }
     node.children.foreach {
       case ShuffleRecoveryInlineOperator(child) =>
-        validateParentReferences(child, parentCount, seen)
-      case ShuffleRecoveryParentExchange(index) if index >= parentCount =>
+        collectParentReferences(child, parentCount, referenced, seen)
+      case ShuffleRecoveryParentExchange(index) if index < parentCount =>
+        referenced += index
+      case ShuffleRecoveryParentExchange(_) =>
         throw new IllegalArgumentException("parent exchange index exceeds parent identity count")
-      case _ =>
     }
   }
 
@@ -789,8 +902,8 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
     var childIndex = 0
     while (childIndex < childCount) {
       in.readByte() match {
-        case 1 => children += ShuffleRecoveryInlineOperator(
-          readOperator(in, budget, depth + 1))
+        case 1 =>
+          children += ShuffleRecoveryInlineOperator(readOperator(in, budget, depth + 1))
         case 2 => children += ShuffleRecoveryParentExchange(in.readInt())
         case tag => throw new IOException(s"unknown operator child tag: $tag")
       }
@@ -880,11 +993,7 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
         expressions += readExpression(in, budget, depth)
         expressionIndex += 1
       }
-      ShuffleRecoveryHashPartitioning(
-        count,
-        expressions.result(),
-        seed,
-        compatibilityId)
+      ShuffleRecoveryHashPartitioning(count, expressions.result(), seed, compatibilityId)
     case 2 => ShuffleRecoverySinglePartition
     case tag => throw new IOException(s"unknown partitioning tag: $tag")
   }
@@ -983,15 +1092,16 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
       .onMalformedInput(CodingErrorAction.REPORT)
       .onUnmappableCharacter(CodingErrorAction.REPORT)
     try {
-      decoder.decode(java.nio.ByteBuffer.wrap(bytes)).toString
+      decoder.decode(ByteBuffer.wrap(bytes)).toString
     } catch {
       case NonFatal(e) => throw new IOException(s"invalid UTF-8 in $field", e)
     }
   }
 
   private def writeBytes(out: DataOutputStream, value: Vector[Byte]): Unit = {
-    out.writeInt(value.size)
-    value.foreach(out.writeByte)
+    val bytes = value.toArray
+    out.writeInt(bytes.length)
+    out.write(bytes)
   }
 
   private def readBytes(
@@ -1036,8 +1146,8 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
   }
 
   private def requireSortedDistinct(keys: Seq[String], field: String): Unit = {
-    if (keys != keys.sorted || keys.distinct.size != keys.size) {
-      throw new IllegalArgumentException(s"$field must be sorted with unique keys")
+    if (keys.exists(_ == null) || keys != keys.sorted || keys.distinct.size != keys.size) {
+      throw new IllegalArgumentException(s"$field must be sorted with unique non-null keys")
     }
   }
 
@@ -1055,7 +1165,16 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
     if (value == null || (!allowEmpty && value.isEmpty)) {
       throw new IllegalArgumentException(s"$field must not be empty")
     }
-    val bytes = value.getBytes(StandardCharsets.UTF_8)
+    val encoder = StandardCharsets.UTF_8.newEncoder()
+      .onMalformedInput(CodingErrorAction.REPORT)
+      .onUnmappableCharacter(CodingErrorAction.REPORT)
+    val encoded = try {
+      encoder.encode(CharBuffer.wrap(value))
+    } catch {
+      case NonFatal(e) => throw new IllegalArgumentException(s"invalid UTF-8 source in $field", e)
+    }
+    val bytes = new Array[Byte](encoded.remaining())
+    encoded.get(bytes)
     if (bytes.length > MaxStringBytes) {
       throw new IllegalArgumentException(s"$field exceeds $MaxStringBytes bytes")
     }
@@ -1069,6 +1188,18 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
       allowEmpty: Boolean = false): Unit = {
     if (value == null || value.size > maximum || (!allowEmpty && value.isEmpty)) {
       throw new IllegalArgumentException(s"invalid $field size")
+    }
+  }
+
+  private def requireNonNull(value: AnyRef, field: String): Unit = {
+    if (value == null) {
+      throw new IllegalArgumentException(s"$field must not be null")
+    }
+  }
+
+  private def requireExact(condition: Boolean, field: String): Unit = {
+    if (!condition) {
+      throw new IllegalArgumentException(s"invalid $field")
     }
   }
 
@@ -1097,7 +1228,15 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
       throw new IllegalArgumentException("digest input must not be null")
     }
     val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
-    digest.iterator.map(byte => f"${byte & 0xff}%02x").mkString
+    val chars = new Array[Char](digest.length * 2)
+    var index = 0
+    while (index < digest.length) {
+      val unsigned = digest(index) & 0xff
+      chars(index * 2) = Character.forDigit(unsigned >>> 4, 16)
+      chars(index * 2 + 1) = Character.forDigit(unsigned & 0xf, 16)
+      index += 1
+    }
+    new String(chars)
   }
 
   private[spark] def compatibleAfterDigestHit(
