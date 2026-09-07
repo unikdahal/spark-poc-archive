@@ -29,7 +29,6 @@ import org.apache.spark.shuffle.{
   ShuffleRecoveryExpressionKind,
   ShuffleRecoveryExpressionNode,
   ShuffleRecoveryHashPartitioning,
-  ShuffleRecoveryIdentityBuilt => _,
   ShuffleRecoveryInlineOperator,
   ShuffleRecoveryIntValue,
   ShuffleRecoveryLongValue,
