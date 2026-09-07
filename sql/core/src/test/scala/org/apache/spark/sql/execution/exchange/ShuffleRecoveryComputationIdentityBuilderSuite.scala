@@ -20,6 +20,7 @@ package org.apache.spark.sql.execution.exchange
 import java.nio.charset.StandardCharsets
 
 import org.apache.spark.shuffle.{
+  ShuffleRecoveryCanonicalValue,
   ShuffleRecoveryComputationIdentity,
   ShuffleRecoveryIntValue,
   ShuffleRecoveryMapperDecomposition,
@@ -191,7 +192,7 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
       firstSplit: String = "split-0",
       ansi: Boolean = false,
       timeZone: String = "UTC",
-      resolvedValues: Map[String, org.apache.spark.shuffle.ShuffleRecoveryCanonicalValue] = Map.empty)
+      resolvedValues: Map[String, ShuffleRecoveryCanonicalValue] = Map.empty)
       : ShuffleRecoveryComputationIdentity = {
     buildResult(
       exchange,
@@ -213,7 +214,7 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
       firstSplit: String = "split-0",
       ansi: Boolean = false,
       timeZone: String = "UTC",
-      resolvedValues: Map[String, org.apache.spark.shuffle.ShuffleRecoveryCanonicalValue] = Map.empty)
+      resolvedValues: Map[String, ShuffleRecoveryCanonicalValue] = Map.empty)
       : ShuffleRecoveryIdentityBuildResult = {
     val range = rangeLeaf(child)
     val inputs = ShuffleRecoveryResolvedIdentityInputs.create(
