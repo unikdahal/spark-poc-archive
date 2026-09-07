@@ -25,7 +25,11 @@ import scala.util.control.NonFatal
 /** Stable namespace for one externally managed recovery lineage incarnation. */
 private[spark] final case class ShuffleRecoveryGroupKey(
     recoveryGroup: String,
-    lineageIncarnationId: String)
+    lineageIncarnationId: String) {
+
+  override def toString: String =
+    "ShuffleRecoveryGroupKey(group=redacted,lineage=redacted)"
+}
 
 /**
  * Redacted authenticated identity carried by recovery operations.
@@ -36,7 +40,14 @@ private[spark] final case class ShuffleRecoveryGroupKey(
 private[spark] final case class ShuffleRecoveryAuthorizationContext(
     principalRef: String,
     policyRef: Option[String],
-    dataViewRef: Option[String])
+    dataViewRef: Option[String]) {
+
+  override def toString: String = {
+    val policy = if (policyRef != null && policyRef.isDefined) "present" else "none"
+    val dataView = if (dataViewRef != null && dataViewRef.isDefined) "present" else "none"
+    s"ShuffleRecoveryAuthorizationContext(principal=redacted,policy=$policy,dataView=$dataView)"
+  }
+}
 
 private[spark] final case class ShuffleRecoveryLifecycleCapabilities(
     mayFinishGroup: Boolean)
@@ -149,7 +160,8 @@ private[spark] final class ShuffleRecoveryAuthorizationGrant private[shuffle] (
     policyRevision > 0L && attemptState.isActive && policyFence.currentRevision == policyRevision
 
   override def toString: String =
-    s"ShuffleRecoveryAuthorizationGrant(${operation.name},revision=$policyRevision,current=$isCurrent)"
+    s"ShuffleRecoveryAuthorizationGrant(${operation.name},revision=$policyRevision," +
+      s"current=$isCurrent)"
 }
 
 private[spark] sealed trait ShuffleRecoveryAuthorizationOperation {
@@ -178,7 +190,21 @@ private[spark] final case class ShuffleRecoveryAuthorizationRequest(
     authorization: ShuffleRecoveryAuthorizationContext,
     operation: ShuffleRecoveryAuthorizationOperation,
     artifactGeneration: Option[Long],
-    artifactIncarnationId: Option[String])
+    artifactIncarnationId: Option[String]) {
+
+  override def toString: String = {
+    val generation = Option(artifactGeneration).flatten.map(_.toString).getOrElse("none")
+    val incarnation = if (artifactIncarnationId != null && artifactIncarnationId.isDefined) {
+      "present"
+    } else {
+      "none"
+    }
+    val operationName = Option(operation).map(_.name).getOrElse("unavailable")
+    s"ShuffleRecoveryAuthorizationRequest(group=redacted,attempt=redacted," +
+      s"authorization=redacted,operation=$operationName,generation=$generation," +
+      s"incarnation=$incarnation)"
+  }
+}
 
 private[shuffle] sealed trait ShuffleRecoveryAuthorizationDecision
 private[shuffle] final case class ShuffleRecoveryAuthorizationAllowed(
@@ -190,7 +216,10 @@ private[shuffle] final case class ShuffleRecoveryAuthorizationDenied(reason: Str
 private[shuffle] case object ShuffleRecoveryAuthorizationUnavailable
   extends ShuffleRecoveryAuthorizationDecision
 
-/** External/current-policy authorization boundary. Calls may block and must stay off the scheduler. */
+/**
+ * External/current-policy authorization boundary.
+ * Calls may block and must stay off the scheduler event loop.
+ */
 private[spark] trait ShuffleRecoveryAuthorizationAuthority {
   def authorize(
       request: ShuffleRecoveryAuthorizationRequest): ShuffleRecoveryAuthorizationDecision
@@ -211,7 +240,7 @@ private[spark] final class ShuffleRecoveryAttemptContext private[shuffle] (
     val retentionPolicy: ShuffleRecoveryRetentionPolicy,
     private val state: ShuffleRecoveryAttemptState) {
 
-  require(generation > 0L, "generation must be positive")
+  require(generation > 0L && generation < Long.MaxValue, "generation must be safely incrementable")
 
   def recoveryGroup: String = groupKey.recoveryGroup
 
@@ -267,6 +296,10 @@ private[spark] final class ShuffleRecoveryAttemptContext private[shuffle] (
         Left(ShuffleRecoveryDiagnostic(
           ShuffleRecoveryProviderUnavailable,
           "authorization-unavailable"))
+      case _ =>
+        Left(ShuffleRecoveryDiagnostic(
+          ShuffleRecoveryProviderUnavailable,
+          "authorization-unavailable"))
     }
   }
 
@@ -282,7 +315,11 @@ private[spark] final class ShuffleRecoveryAttemptContext private[shuffle] (
 private[spark] final case class ShuffleRecoveryGenerationRequest(
     groupKey: ShuffleRecoveryGroupKey,
     attemptInstanceId: String,
-    principalRef: String)
+    principalRef: String) {
+
+  override def toString: String =
+    "ShuffleRecoveryGenerationRequest(group=redacted,attempt=redacted,principal=redacted)"
+}
 
 private[spark] sealed trait ShuffleRecoveryGenerationResult
 private[spark] final case class ShuffleRecoveryGenerationAllocated(generation: Long)
@@ -321,9 +358,9 @@ private[spark] final class ReferenceShuffleRecoveryGenerationAllocator(
   require(maxGroups > 0, "maximum recovery groups must be positive")
   require(maxAttemptsPerGroup > 0, "maximum attempts per recovery group must be positive")
 
-  private final case class GroupState(
+  private final class GroupState(
       var highestGeneration: Long,
-      attempts: mutable.HashMap[String, Long])
+      val attempts: mutable.HashMap[String, Long])
 
   private val groups = mutable.HashMap.empty[ShuffleRecoveryGroupKey, GroupState]
 
@@ -339,7 +376,7 @@ private[spark] final class ReferenceShuffleRecoveryGenerationAllocator(
               case Some(existing) => ShuffleRecoveryGenerationAllocated(existing)
               case None if group.attempts.size >= maxAttemptsPerGroup =>
                 ShuffleRecoveryGenerationAllocationUnavailable
-              case None if group.highestGeneration == Long.MaxValue =>
+              case None if group.highestGeneration >= Long.MaxValue - 1L =>
                 ShuffleRecoveryGenerationAllocationInvalid
               case None =>
                 val next = group.highestGeneration + 1L
@@ -356,7 +393,8 @@ private[spark] final class ReferenceShuffleRecoveryGenerationAllocator(
       generation: Long): ShuffleRecoveryGenerationResult = synchronized {
     validateRequest(request) match {
       case Some(_) => ShuffleRecoveryGenerationAllocationInvalid
-      case None if generation <= 0L => ShuffleRecoveryGenerationAllocationInvalid
+      case None if generation <= 0L || generation == Long.MaxValue =>
+        ShuffleRecoveryGenerationAllocationInvalid
       case None =>
         groupState(request.groupKey) match {
           case Left(result) => result
@@ -391,7 +429,7 @@ private[spark] final class ReferenceShuffleRecoveryGenerationAllocator(
       case Some(group) => Right(group)
       case None if groups.size >= maxGroups => Left(ShuffleRecoveryGenerationAllocationUnavailable)
       case None =>
-        val group = GroupState(0L, mutable.HashMap.empty[String, Long])
+        val group = new GroupState(0L, mutable.HashMap.empty[String, Long])
         groups.put(groupKey, group)
         Right(group)
     }
@@ -501,7 +539,7 @@ private[spark] object ShuffleRecoveryAttemptContext {
       } catch {
         case _: NumberFormatException => None
       }
-    }.filter(_ > 0L).getOrElse {
+    }.filter(value => value > 0L && value < Long.MaxValue).getOrElse {
       return Left(ShuffleRecoveryDiagnostic(
         ShuffleRecoveryGenerationInvalid,
         "missing-or-malformed-generation"))
@@ -539,8 +577,8 @@ private[spark] object ShuffleRecoveryAttemptContext {
       ShuffleRecoveryLifecycleCapabilities(mayFinishGroup = false),
       ShuffleRecoveryRetentionPolicy(None),
       0L).foreach(diagnostic => throw new IllegalArgumentException(diagnostic.toString))
-    if (generation <= 0L) {
-      throw new IllegalArgumentException("generation must be positive")
+    if (generation <= 0L || generation == Long.MaxValue) {
+      throw new IllegalArgumentException("generation must be safely incrementable")
     }
     new ShuffleRecoveryAttemptContext(
       groupKey,
@@ -560,7 +598,8 @@ private[spark] object ShuffleRecoveryAttemptContext {
       retentionPolicy: ShuffleRecoveryRetentionPolicy,
       result: ShuffleRecoveryGenerationResult):
       Either[ShuffleRecoveryDiagnostic, ShuffleRecoveryAttemptContext] = result match {
-    case ShuffleRecoveryGenerationAllocated(generation) if generation > 0L =>
+    case ShuffleRecoveryGenerationAllocated(generation)
+        if generation > 0L && generation < Long.MaxValue =>
       Right(new ShuffleRecoveryAttemptContext(
         groupKey,
         generation,
@@ -578,6 +617,10 @@ private[spark] object ShuffleRecoveryAttemptContext {
         ShuffleRecoveryGenerationInvalid,
         "generation-allocation-invalid"))
     case ShuffleRecoveryGenerationAllocationUnavailable =>
+      Left(ShuffleRecoveryDiagnostic(
+        ShuffleRecoveryContextUnavailable,
+        "generation-allocation-unavailable"))
+    case _ =>
       Left(ShuffleRecoveryDiagnostic(
         ShuffleRecoveryContextUnavailable,
         "generation-allocation-unavailable"))
@@ -638,11 +681,11 @@ private[spark] object ShuffleRecoveryAttemptContext {
 private[spark] final class ReferenceShuffleRecoveryAuthorizationAuthority
   extends ShuffleRecoveryAuthorizationAuthority {
 
-  private final case class Policy(
-      principalRef: String,
-      dataViewRef: Option[String],
+  private final class Policy(
+      val principalRef: String,
+      val dataViewRef: Option[String],
       var allowed: Boolean,
-      fence: ShuffleRecoveryAuthorizationFence)
+      val fence: ShuffleRecoveryAuthorizationFence)
 
   private val policies = mutable.HashMap.empty[ShuffleRecoveryGroupKey, Policy]
 
@@ -661,13 +704,13 @@ private[spark] final class ReferenceShuffleRecoveryAuthorizationAuthority
     policies.get(groupKey) match {
       case Some(policy) =>
         val revision = policy.fence.advance()
-        policies.put(groupKey, Policy(
+        policies.put(groupKey, new Policy(
           principalRef,
           dataViewRef,
           allowed = revision > 0L,
           policy.fence))
       case None =>
-        policies.put(groupKey, Policy(
+        policies.put(groupKey, new Policy(
           principalRef,
           dataViewRef,
           allowed = true,
