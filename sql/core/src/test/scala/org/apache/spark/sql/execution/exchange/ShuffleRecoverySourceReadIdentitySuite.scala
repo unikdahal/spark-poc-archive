@@ -332,7 +332,8 @@ class ShuffleRecoverySourceReadIdentitySuite extends SharedSparkSession {
       validBytes,
       decompositionCertificate = Some(validDecomposition))
 
-    def validate(candidate: ShuffleRecoverySourceTokenCandidate) = {
+    def validate(
+        candidate: ShuffleRecoverySourceTokenCandidate): ShuffleRecoverySourceIdentityResult = {
       ShuffleRecoverySourceReadIdentity.validateCandidate(
         candidate,
         Set(referenceAdapter.adapterId),
