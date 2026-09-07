@@ -1,10 +1,10 @@
 #
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information regarding copyright ownership.
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
 # The ASF licenses this file to You under the Apache License, Version 2.0
-# (the "License"); you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
 #
 #    http://www.apache.org/licenses/LICENSE-2.0
 #
@@ -85,6 +85,81 @@ jobs:
       - name: Run Scala style checks
         run: timeout --signal=TERM 20m ./dev/scalastyle "-Phadoop-3 -Phive"
 
+  source-identity:
+    name: Source identity contract and cross-JVM proof (SQL, JDK 17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout requested head
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: 17
+
+      - name: Cache build dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            build/apache-maven-*
+            build/*.jar
+            ~/.sbt
+            ~/.cache/coursier
+          key: shuffle-recovery-experimental-source-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties', 'build/sbt') }}
+          restore-keys: |
+            shuffle-recovery-experimental-source-${{ runner.os }}-
+            shuffle-recovery-build-${{ runner.os }}-
+
+      - name: Compile SQL production and test code
+        shell: bash
+        run: |
+          set -o pipefail
+          ./build/sbt -Phadoop-3 -Phive "sql/Test/compile" 2>&1 | \
+            tee "${RUNNER_TEMP}/shuffle-recovery-source-sql-compile.log"
+
+      - name: Upload SQL compile diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shuffle-recovery-source-sql-compile-${{ github.run_id }}
+          path: ${{ runner.temp }}/shuffle-recovery-source-sql-compile.log
+          if-no-files-found: error
+
+      - name: Run source-token and resolved-value regressions
+        run: |
+          ./build/sbt -Phadoop-3 -Phive \
+            "sql/testOnly org.apache.spark.sql.execution.exchange.ShuffleRecoverySourceReadIdentitySuite"
+
+      - name: Prove source token is stable across independent JVMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          first="${RUNNER_TEMP}/shuffle-recovery-source-first.txt"
+          second="${RUNNER_TEMP}/shuffle-recovery-source-second.txt"
+          rm -f "${first}" "${second}"
+          ./build/sbt -Phadoop-3 -Phive \
+            "project sql" \
+            "set Test / run / fork := true" \
+            "Test/runMain org.apache.spark.sql.execution.exchange.ShuffleRecoverySourceReadIdentityProcess ${first}" \
+            "Test/runMain org.apache.spark.sql.execution.exchange.ShuffleRecoverySourceReadIdentityProcess ${second}"
+          test -s "${first}"
+          test -s "${second}"
+          cmp "${first}" "${second}"
+
+      - name: Validate focused SQL test discovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$(find sql -type f -path '*/test-reports/*' \
+            -name '*ShuffleRecoverySourceReadIdentitySuite*.xml' -print -quit)"
+          test -n "${report}"
+
   core-identity:
     name: Canonical identity codec and cross-JVM proof (Core, JDK 17)
     runs-on: ubuntu-latest
@@ -148,7 +223,7 @@ jobs:
             -name '*ShuffleRecoveryComputationIdentitySuite*.xml' -print -quit)"
           test -n "${report}"
 
-  sql-identity:
+  canonical-sql-identity:
     name: SQL materialization-boundary identity policy (JDK 17)
     runs-on: ubuntu-latest
     timeout-minutes: 75
