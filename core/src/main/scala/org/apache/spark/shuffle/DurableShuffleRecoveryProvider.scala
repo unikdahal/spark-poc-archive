@@ -69,8 +69,9 @@ private[spark] object DurableShuffleRecoveryContract {
   val ReadVersion = 1
 
   val ExactReducerRangeFetch = "exact-reducer-range-v1"
-  val ExactIndexSha256AndReducerChecksum = "sha256-index+reducer-checksum-v1"
-  val AttemptBindingIndependentArtifacts = "attempt-binding-independent-artifacts-v1"
+  val ExactIndexSha256AndReducerChecksum = "sha256-index+optional-reducer-checksum-v1"
+  val AttemptBindingIndependentArtifacts =
+    "attempt-binding-independent-artifacts+provider-retention-v1"
   val CurrentAttemptAuthorization = "current-attempt-authorization-v1"
 
   val MaxCapabilities = 8
