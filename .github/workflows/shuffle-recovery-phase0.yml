@@ -117,7 +117,19 @@ jobs:
             shuffle-recovery-build-${{ runner.os }}-
 
       - name: Compile SQL production and test code
-        run: ./build/sbt -Phadoop-3 -Phive "sql/Test/compile"
+        shell: bash
+        run: |
+          set -o pipefail
+          ./build/sbt -Phadoop-3 -Phive "sql/Test/compile" 2>&1 | \
+            tee "${RUNNER_TEMP}/shuffle-recovery-source-sql-compile.log"
+
+      - name: Upload SQL compile diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shuffle-recovery-source-sql-compile-${{ github.run_id }}
+          path: ${{ runner.temp }}/shuffle-recovery-source-sql-compile.log
+          if-no-files-found: error
 
       - name: Run source-token, resolved-value and adapter-binding regressions
         run: |
