@@ -1,0 +1,206 @@
+{
+  "schemaVersion": 1,
+  "specId": "shuffle-recovery-value-experiment-v1",
+  "lineage": {
+    "upstreamBaseline": "2a7cfea06ba135cf0ddc62902eb0daf5a835c672",
+    "experimentalBase": "5f773c4669d06af57216b09748ec7d168412ad3c",
+    "frozenPhase0Evidence": "7888d1e26d32e69694083e367ee6a92b28277c48"
+  },
+  "provenance": {
+    "profileKind": "explicit-scenario",
+    "realTraceWeights": false,
+    "historicalPilotActionsRun": 33963836467,
+    "historicalPilotArtifactId": 9969032965,
+    "historicalPilotArtifactSha256": "15bb5b3c2ebfbfa565c95163c9a2644cd9a147971f39c62d23583a84f6090013"
+  },
+  "targetDeployment": {
+    "orchestrator": "Kubernetes batch application relaunch",
+    "source": "Apache Iceberg table pinned to explicit snapshot id",
+    "shuffleProvider": "Apache Celeborn real durable remote-shuffle candidate",
+    "driver": {
+      "vCpu": 4,
+      "memoryGiB": 16
+    },
+    "executors": {
+      "count": 32,
+      "vCpuEach": 8,
+      "memoryGiBEach": 32
+    },
+    "networkGbpsPerWorker": 10,
+    "factSnapshotGiB": 256,
+    "dimensionSnapshotGiB": 8,
+    "artifactRetentionHours": 2,
+    "conditionalDriverFailureRate": 0.01
+  },
+  "producerGrammar": {
+    "maxAdoptedExchangesPerQuery": 1,
+    "allowed": [
+      "certified immutable snapshot scan",
+      "optional reviewed deterministic projection",
+      "optional reviewed deterministic filter",
+      "hash partitioning",
+      "single partitioning"
+    ],
+    "excludedBelowProducer": [
+      "join",
+      "aggregate",
+      "window",
+      "runtime filter",
+      "subquery",
+      "Python/UDF/native expression"
+    ],
+    "queryExcluded": [
+      "writes",
+      "streaming",
+      "incremental external result delivery",
+      "partial-map reuse",
+      "unsupported expressions",
+      "runtime-dependent scans"
+    ]
+  },
+  "cohort": [
+    {
+      "id": "G01",
+      "weight": 0.25,
+      "shape": "scan/filter/project -> hash exchange -> grouped aggregate"
+    },
+    {
+      "id": "W01",
+      "weight": 0.15,
+      "shape": "scan/filter/project -> hash exchange -> partitioned window"
+    },
+    {
+      "id": "S01",
+      "weight": 0.10,
+      "shape": "scan/filter/project -> single-partition exchange -> global ordered consumer"
+    },
+    {
+      "id": "J01",
+      "weight": 0.20,
+      "shape": "fact scan/filter/project -> hash exchange -> downstream sort-merge join with current dimension scan"
+    },
+    {
+      "id": "D01",
+      "weight": 0.20,
+      "shape": "scan/filter/project -> hash exchange -> aggregate -> later fresh shuffle/consumer"
+    },
+    {
+      "id": "E01",
+      "weight": 0.10,
+      "shape": "high-selectivity scan/filter/project -> hash exchange -> grouped aggregate, including sparse/zero-block outputs"
+    }
+  ],
+  "failurePoints": [
+    {
+      "id": "F0",
+      "weight": 0.25,
+      "name": "pre-publication",
+      "rule": "producer computation has completed but durable publication has not become visible"
+    },
+    {
+      "id": "F1",
+      "weight": 0.30,
+      "name": "post-publication-early",
+      "rule": "durable publication is visible before any downstream post-exchange stage completes"
+    },
+    {
+      "id": "F2",
+      "weight": 0.30,
+      "name": "post-publication-middle",
+      "rule": "first material downstream stage after the target exchange has completed"
+    },
+    {
+      "id": "F3",
+      "weight": 0.15,
+      "name": "post-publication-late",
+      "rule": "immediately before the final material downstream stage is launched"
+    }
+  ],
+  "primaryShapes": [
+    {
+      "maps": 128,
+      "reducers": 1
+    },
+    {
+      "maps": 512,
+      "reducers": 64
+    },
+    {
+      "maps": 2048,
+      "reducers": 256
+    },
+    {
+      "maps": 4096,
+      "reducers": 512
+    }
+  ],
+  "mechanismOnlyShapes": [
+    {
+      "maps": 8192,
+      "reducers": 1024
+    },
+    {
+      "maps": 4096,
+      "reducers": 2048
+    }
+  ],
+  "resourceLimits": {
+    "manifestBytes": 4194304,
+    "driverRecoveryMetadataBytes": 33554432,
+    "providerDiscoveryBytes": 8388608,
+    "providerIndexBytes": 536870912,
+    "candidateIncarnations": 4,
+    "lookupDeadlineMs": 3000,
+    "prepareDeadlineMs": 10000,
+    "metadataPageBytes": 1048576,
+    "metadataPages": 256,
+    "concurrentProviderReads": 128,
+    "artifactBytes": 274877906944,
+    "artifactGiBHours": 512
+  },
+  "trialPolicy": {
+    "pairedRepetitionsPerCell": 12,
+    "randomizationSeed": 557003,
+    "hardTimeoutSeconds": 1800,
+    "aqe": "Spark default enabled in primary campaign",
+    "outlierDeletion": "none",
+    "cacheWarmth": "natural backend warmth; no manual cache flush in primary campaign",
+    "misses": "included in recovery arm",
+    "recoveryTimeout": "penalized at hard timeout when paired control reaches a correct result",
+    "baselineTimeout": "no positive speedup credit; pair reported separately and contributes to reliability gate",
+    "bothFail": "no speedup credit; reported and contributes to reliability gate",
+    "maxControlFailureFractionForPass": 0.01,
+    "notApplicableScenarioMassIndeterminateThreshold": 0.05
+  },
+  "statistics": {
+    "aggregateMetric": "1 - weighted_sum(recovery failure-to-correct-result ms) / weighted_sum(control failure-to-correct-result ms)",
+    "confidence": "paired stratified cluster bootstrap by workload id with 10000 resamples",
+    "confidenceLevel": 0.95,
+    "bootstrapSeed": 55003
+  },
+  "gates": {
+    "restartImprovementPointEstimateMin": 0.20,
+    "restartImprovementLower95Comparison": ">",
+    "restartImprovementLower95Threshold": 0.0,
+    "disabledOverheadUpper95Max": 0.01,
+    "allMissOverheadUpper95Max": 0.05,
+    "publicationNoFailureOverheadUpper95Max": 0.05,
+    "positiveDeploymentEconomics": true,
+    "economicsLower95Comparison": ">",
+    "economicsLower95Threshold": 0.0,
+    "wrongResultAllowed": false
+  },
+  "costModel": {
+    "unit": "scenario USD",
+    "rates": {
+      "vCpuHour": 0.04,
+      "memoryGiBHour": 0.005,
+      "durableStorageGiBHour": 0.00004,
+      "incrementalProviderReadGiB": 0.01,
+      "incrementalProviderWriteGiB": 0.01
+    },
+    "publicationAccounting": "charge only bytes and service work introduced by recovery publication; ordinary shuffle writes are reported separately and are not double-counted",
+    "greenfieldDurableStorageIntroductionReportedSeparately": true,
+    "notes": "Planning assumptions only; not vendor quotes. Report existing-provider and greenfield introduction economics separately."
+  }
+}
