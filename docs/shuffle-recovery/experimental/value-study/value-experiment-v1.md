@@ -16,6 +16,8 @@ Companions:
 
 - [`workload-scope-v1.md`](workload-scope-v1.md) freezes exact SQL, dataset provenance, producer and
   downstream scope, and primary map/reducer envelopes.
+- [`cost-model-v1.md`](cost-model-v1.md) freezes common-unit existing-provider and numerical
+  greenfield durable-storage economics.
 - [`value-experiment-v1.json`](value-experiment-v1.json) is the machine-readable campaign contract.
 
 ## Lineage and historical evidence boundary
@@ -54,7 +56,8 @@ The target pairing is:
 - nominal target fact snapshot: 256 GiB;
 - dimension snapshot: 8 GiB +/-2%;
 - retained completed-shuffle lifetime: 2 hours;
-- scenario driver-failure frequency: 1.0% of query attempts.
+- scenario driver-failure frequency: 1.0% of query attempts;
+- greenfield economics arrival rate: 20 primary read-only batch query attempts per hour.
 
 Iceberg and Celeborn are targets, not presumed compatible implementations. Failure of a later source
 or provider gate is a gate failure or reason for a new prospective profile; this file is not silently
@@ -159,8 +162,14 @@ dropped merely because reuse is impossible.
 
 A structural failure-free admission pilot may verify source decomposition, physical-plan shape, and
 stage landmarks, but it must not collect or use restart timing. A cell lacking its registered
-landmark is `NOT_APPLICABLE` before performance execution and its weight is not redistributed. More
-than 5% total scenario mass not applicable makes the campaign **INDETERMINATE**.
+landmark is `NOT_APPLICABLE` before performance execution and its weight is not redistributed.
+Primary scales each carry weight 25%, so one cell's registered scenario mass is:
+
+```text
+workload weight x failure-point weight x 0.25 scale weight
+```
+
+More than 5% total registered scenario mass not applicable makes the campaign **INDETERMINATE**.
 
 ## Timing boundary
 
@@ -219,13 +228,15 @@ Hard per-attempt timeout: **1,800 seconds**.
 Recovery misses remain in the recovery arm. A safe miss that recomputes normally is not missing data
 and cannot be excluded from the speedup distribution.
 
-Predetermined rules:
+Predetermined scoring/reporting rules:
 
-- recovery times out/fails while control succeeds: assign recovery 1,800 seconds for the primary
-  timing effect and retain the concrete failure reason;
-- control times out/fails while recovery succeeds: no positive speedup credit; report separately and
-  count against control reliability;
-- both arms fail/time out: no speedup credit; report and count against reliability;
+- recovery times out or fails to produce a correct result while control succeeds: use the observed
+  control time and score recovery as 1,800 seconds; retain the concrete failure reason;
+- control times out or fails while recovery succeeds: score **both** `T_control` and `T_recovery` as
+  1,800 seconds for the primary effect, giving the pair exactly zero speedup credit; separately
+  report the actual recovery observation and count the control failure against reliability;
+- both arms fail or time out: score both arms as 1,800 seconds for the primary effect, giving exactly
+  zero speedup credit, and count the pair against reliability;
 - result digest or row-count mismatch: correctness failure; campaign cannot PASS;
 - provider/manifest uncertainty, timeout, malformed metadata, authorization failure, or ordinary
   recovery rejection: safe miss; retain full observed recovery time;
@@ -233,11 +244,13 @@ Predetermined rules:
   unless classified by a rule above.
 
 The campaign cannot PASS if more than 1% of ordinary-control trials fail to reach a correct result,
-or if any recovery trial produces a wrong result.
+or if any recovery trial produces a wrong result. The timeout imputations above are deliberately
+conservative and make every non-harness pair numerically defined before aggregation.
 
 ## Aggregation and confidence method
 
-For each valid pair, let `T_control` and `T_recovery` be failure-to-correct-result time.
+For each scored pair, let `T_control` and `T_recovery` be the observed or predeclared-imputed
+failure-to-correct-result times.
 
 Headline improvement:
 
@@ -245,19 +258,26 @@ Headline improvement:
 1 - weighted_sum(T_recovery) / weighted_sum(T_control)
 ```
 
-Weights are frozen cohort weight x conditional failure-point weight. Input scales are reported
-individually and in an equal-scale aggregate; scale weights are not inferred from observed results.
+Weights are frozen cohort weight x conditional failure-point weight x equal 25% input-scale weight.
+The four input scales are also reported individually; scale weights are never inferred from observed
+results.
 
-The 95% interval is a deterministic paired, stratified cluster bootstrap:
+The 95% interval is a deterministic **paired stratified bootstrap over repetitions while keeping the
+registered scenario composition fixed**:
 
-1. workload ids are top-level resampling clusters;
-2. paired repetitions are resampled within failure-point and input-scale strata;
-3. frozen scenario weights are reapplied each resample;
-4. 10,000 resamples;
-5. bootstrap seed `55003`;
-6. physical exchanges are never treated as IID observations.
+1. each `(workload id, input scale, failure point)` cell remains present exactly once in every
+   bootstrap replicate;
+2. within each applicable cell, resample its 12 scored control/recovery pairs together with
+   replacement, preserving pair dependence and randomized-order blocks;
+3. compute the cell control/recovery sums and reapply the frozen workload, failure-point, and 25%
+   input-scale weights;
+4. do not resample workload identities: the six workloads are the registered scenario itself, not a
+   random sample from a workload superpopulation;
+5. use 10,000 bootstrap replicates with seed `55003`;
+6. physical exchanges or individual map/reducer blocks are never treated as IID observations.
 
-Raw paired observations, bootstrap input, seed, and rendered interval are retained as evidence.
+Raw paired observations, imputation classifications, bootstrap input, seed, and rendered interval
+are retained as evidence.
 
 ## Prospective value and overhead gates
 
@@ -365,9 +385,13 @@ net_incremental_value =
 The deployment-economics gate requires `net_incremental_value > 0` and lower 95% confidence bound
 above zero under frozen scenario weights.
 
-The cost of **introducing** durable shuffle storage is reported separately as
-`greenfield_introduction_cost`: required provider nodes/disks, reserved capacity, control-plane
-service cost, and amortized setup/operations cost in scenario USD. The final report shows both:
+The cost of **introducing** durable shuffle storage is separately frozen in `cost-model-v1.md` as
+`greenfield_introduction_cost`: provider workers, control-plane capacity, reserved storage, and a
+setup/operations allocation in the same scenario USD unit. The registered greenfield profile uses
+20 query attempts/hour, a 24 TiB reservation, total fixed cost `$6.12304/hour`, and fixed allocation
+`$0.306152/query` before separately billable incremental traffic.
+
+The final report must show both:
 
 1. economics when a compatible durable provider already exists; and
 2. economics when durable storage must be introduced for this feature.
@@ -387,7 +411,7 @@ Once any primary performance timing is observed, these cannot change in place:
 - resource limits;
 - confidence method or seeds;
 - value/overhead/economics thresholds;
-- scenario cost rates.
+- scenario cost rates and greenfield footprint/arrival rate.
 
 A material change creates `v2` or later and is prospective. v1 raw data and its decision remain
 published.
