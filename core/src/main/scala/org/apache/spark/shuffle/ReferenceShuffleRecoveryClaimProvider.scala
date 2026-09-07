@@ -33,21 +33,27 @@ import org.apache.spark.SparkConf
  * Reference-provider claim adapter.
  *
  * A binding is an attempt-local alias only. It never moves, rewrites, revokes, or deletes the
- * immutable group-scoped artifacts that it references.
+ * immutable group-scoped artifacts that it references. Current authorization is checked before a
+ * claim and its local revocation fence remains attached to the binding for subsequent reads.
  */
 private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     providerRoot: Path,
-    conf: SparkConf = new SparkConf(false)) extends ShuffleRecoveryClaimProvider {
+    conf: SparkConf = new SparkConf(false),
+    authorizationAuthority: ShuffleRecoveryAuthorizationAuthority =
+      ReferenceShuffleRecoveryClaimProvider.FeasibilityAuthorizationAuthority)
+  extends ShuffleRecoveryClaimProvider {
 
   import ReferenceShuffleRecoveryClaimProvider._
 
-  if (providerRoot == null || conf == null) {
-    throw new IllegalArgumentException("provider root and SparkConf must not be null")
+  if (providerRoot == null || conf == null || authorizationAuthority == null) {
+    throw new IllegalArgumentException(
+      "provider root, SparkConf, and authorization authority must not be null")
   }
 
   private final class ActiveBinding(
       val binding: ShuffleRecoveryBinding,
-      val provider: ReferenceShuffleProvider)
+      val provider: ReferenceShuffleProvider,
+      val authorizationGrant: ShuffleRecoveryAuthorizationGrant)
 
   private val activeBindings = new ConcurrentHashMap[String, ActiveBinding]()
 
@@ -61,6 +67,15 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
       case None =>
     }
 
+    val grant = request.attemptContext.authorize(
+      authorizationAuthority,
+      ShuffleRecoveryClaim,
+      Some(request.publishingGeneration),
+      Some(request.incarnationId)) match {
+      case Right(value) => value
+      case Left(diagnostic) => return authorizationFailure(diagnostic)
+    }
+
     val provider = openExistingProvider(request) match {
       case Right(value) => value
       case Left(result) => return result
@@ -69,6 +84,9 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     val maps = new Array[ShuffleRecoveryClaimedMapDescriptor](request.mapperCount)
     var mapIndex = 0
     while (mapIndex < request.mapperCount) {
+      if (!request.attemptContext.isActive || !grant.isCurrent) {
+        return ShuffleRecoveryClaimRejected("authorization changed during provider claim")
+      }
       inspectMap(provider, request, request.mapArtifacts(mapIndex)) match {
         case Left(result) => return result
         case Right(descriptor) => maps(mapIndex) = descriptor
@@ -76,15 +94,23 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
       mapIndex += 1
     }
 
+    if (!request.attemptContext.isActive || !grant.isCurrent) {
+      return ShuffleRecoveryClaimRejected("authorization changed during provider claim")
+    }
     val binding = ShuffleRecoveryBinding(
       UUID.randomUUID().toString,
       request.targetShuffleId,
       request.recoveryGroup,
       request.publishingGeneration,
-      request.incarnationId)
-    val active = new ActiveBinding(binding, provider)
+      request.incarnationId,
+      request.attemptContext.attemptInstanceId)
+    val active = new ActiveBinding(binding, provider, grant)
     if (activeBindings.putIfAbsent(binding.bindingId, active) != null) {
       return ShuffleRecoveryClaimUnavailable
+    }
+    if (!request.attemptContext.isActive || !grant.isCurrent) {
+      activeBindings.remove(binding.bindingId, active)
+      return ShuffleRecoveryClaimRejected("authorization changed before provider binding")
     }
     ShuffleRecoveryClaimed(
       binding,
@@ -95,7 +121,9 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
         compatibilityId,
         request.targetShuffleId,
         ShuffleRecoveryManifest.DescriptorVersion,
-        maps))
+        maps,
+        request.attemptContext.attemptInstanceId),
+      Some(grant))
   }
 
   override def release(binding: ShuffleRecoveryBinding): Unit = {
@@ -114,9 +142,11 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
       false
     } else {
       val active = activeBindings.get(binding.bindingId)
-      active != null && active.binding == binding
+      active != null && active.binding == binding && active.authorizationGrant.isCurrent
     }
   }
+
+  private[shuffle] def activeBindingCount: Int = activeBindings.size()
 
   private[shuffle] def openBoundMap(
       binding: ShuffleRecoveryBinding,
@@ -126,8 +156,8 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
       throw new IllegalArgumentException("shuffle recovery binding must not be null")
     }
     val active = activeBindings.get(binding.bindingId)
-    if (active == null || active.binding != binding) {
-      throw new IOException("shuffle recovery binding is not active")
+    if (active == null || active.binding != binding || !active.authorizationGrant.isCurrent) {
+      throw new IOException("shuffle recovery binding is not active or authorized")
     }
     active.provider.openMap(mapIndex)
   }
@@ -148,7 +178,7 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
       return ShuffleRecoveryBoundMapFailed(ShuffleRecoveryAdoptedUnavailable)
     }
     val active = activeBindings.get(binding.bindingId)
-    if (active == null || active.binding != binding) {
+    if (active == null || active.binding != binding || !active.authorizationGrant.isCurrent) {
       return ShuffleRecoveryBoundMapFailed(ShuffleRecoveryAdoptedUnavailable)
     }
 
@@ -172,12 +202,23 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
         return ShuffleRecoveryBoundMapFailed(ShuffleRecoveryAdoptedUnavailable)
     }
 
-    if (resolved.numReducers <= 0 ||
+    if (!active.authorizationGrant.isCurrent) {
+      ShuffleRecoveryBoundMapFailed(ShuffleRecoveryAdoptedUnavailable)
+    } else if (resolved.numReducers <= 0 ||
         resolved.dataLength != expected.dataLength ||
         resolved.indexBytes != expected.indexLength) {
       ShuffleRecoveryBoundMapFailed(ShuffleRecoveryAdoptedCorrupt)
     } else {
       ShuffleRecoveryBoundMapOpened(resolved)
+    }
+  }
+
+  private def authorizationFailure(
+      diagnostic: ShuffleRecoveryDiagnostic): ShuffleRecoveryClaimResult = {
+    diagnostic.code match {
+      case ShuffleRecoveryAuthorizationRejected | ShuffleRecoveryRetentionExpired =>
+        ShuffleRecoveryClaimRejected(diagnostic.code.name)
+      case _ => ShuffleRecoveryClaimUnavailable
     }
   }
 
@@ -324,16 +365,23 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
   }
 
   private def validateRequest(request: ShuffleRecoveryClaimRequest): Option[String] = {
-    if (request == null || request.recoveryGroup == null || request.incarnationId == null ||
-        request.providerCompatibilityId == null || request.mapArtifacts == null) {
+    if (request == null || request.attemptContext == null || request.recoveryGroup == null ||
+        request.incarnationId == null || request.providerCompatibilityId == null ||
+        request.mapArtifacts == null) {
       Some("claim request contains a null field")
+    } else if (!request.attemptContext.isActive) {
+      Some("claim request attempt context is stopped")
     } else if (!safeIdentifier(request.recoveryGroup) ||
         !safeIdentifier(request.incarnationId)) {
       Some("claim request contains an invalid provider namespace")
     } else if (request.providerCompatibilityId != compatibilityId) {
       Some("provider compatibility id does not match the reference provider")
-    } else if (request.publishingGeneration <= 0L || request.targetShuffleId < 0) {
+    } else if (request.publishingGeneration <= 0L ||
+        request.publishingGeneration >= request.attemptContext.generation ||
+        request.targetShuffleId < 0) {
       Some("claim request contains an invalid generation or target shuffle id")
+    } else if (request.attemptContext.retentionExpired(System.currentTimeMillis())) {
+      Some("claim request retention has expired")
     } else if (request.mapperCount < 0 ||
         request.mapperCount > ShuffleRecoveryManifestCodec.MaxMaps ||
         request.mapArtifacts.size != request.mapperCount) {
@@ -498,4 +546,19 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
 private[shuffle] object ReferenceShuffleRecoveryClaimProvider {
   private val MaxWinnerHandleBytes = 256L
   private val MaxExactIndexBytes = 64L * 1024L * 1024L
+
+  private object FeasibilityAuthorizationAuthority
+    extends ShuffleRecoveryAuthorizationAuthority {
+    private val fence = new ShuffleRecoveryAuthorizationFence(1L)
+
+    override def authorize(
+        request: ShuffleRecoveryAuthorizationRequest): ShuffleRecoveryAuthorizationDecision = {
+      if (request != null && request.authorization != null &&
+          request.authorization.principalRef == "phase0-feasibility-principal") {
+        ShuffleRecoveryAuthorizationAllowed(1L, fence)
+      } else {
+        ShuffleRecoveryAuthorizationDenied("authenticated attempt context required")
+      }
+    }
+  }
 }

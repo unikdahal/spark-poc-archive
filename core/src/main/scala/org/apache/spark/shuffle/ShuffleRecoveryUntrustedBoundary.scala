@@ -37,7 +37,8 @@ private[spark] final case class ShuffleRecoveryPreparedMap(
  *
  * Exact reducer addressing remains in the immutable reference-provider index and is revalidated
  * by the fetch path. The driver retains O(M) prepared map descriptors rather than an O(M x R)
- * block matrix.
+ * block matrix. Authorization remains represented by a local revocation fence; no external policy
+ * call is required for scheduler installation.
  */
 private[spark] final case class PreparedShuffleRecoveryAdoption(
     reservation: ShuffleRecoveryAdoptionReservation,
@@ -49,7 +50,9 @@ private[spark] final case class PreparedShuffleRecoveryAdoption(
     targetShuffleId: Int,
     mapperCount: Int,
     reducerCount: Int,
-    maps: Vector[ShuffleRecoveryPreparedMap])
+    maps: Vector[ShuffleRecoveryPreparedMap],
+    attemptContext: Option[ShuffleRecoveryAttemptContext] = None,
+    authorizationGrant: Option[ShuffleRecoveryAuthorizationGrant] = None)
 
 private[shuffle] final case class ShuffleRecoveryValidatedCandidate(
     recoveryGroup: String,
@@ -86,9 +89,12 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
       expectedIdentity: ShuffleRecoveryFeasibilityIdentity,
       manifest: ShuffleRecoveryManifest): Either[String, ShuffleRecoveryValidatedCandidate] = {
     try {
-      if (request == null || request.target == null || expectedIdentity == null ||
-          manifest == null) {
+      if (request == null || request.attemptContext == null || request.target == null ||
+          expectedIdentity == null || manifest == null) {
         return Left("candidate validation received a null field")
+      }
+      if (!request.attemptContext.isActive) {
+        return Left("candidate validation attempt context is stopped")
       }
       if (request.recoveryGroup == null || request.recoveryGroup != manifest.recoveryGroup) {
         return Left("candidate recovery group does not match the current request")
@@ -144,9 +150,19 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
       candidate: ShuffleRecoveryValidatedCandidate,
       claimed: ShuffleRecoveryClaimed): Either[String, PreparedShuffleRecoveryAdoption] = {
     try {
-      if (request == null || reservation == null || candidate == null || claimed == null ||
-          claimed.binding == null || claimed.descriptor == null) {
+      if (request == null || request.attemptContext == null || reservation == null ||
+          candidate == null || claimed == null || claimed.binding == null ||
+          claimed.descriptor == null) {
         return Left("claimed recovery metadata contains a null field")
+      }
+      if (!request.attemptContext.isActive) {
+        return Left("claimed recovery attempt context is stopped")
+      }
+      val authorizationGrant = claimed.authorizationGrant match {
+        case Some(grant)
+            if grant != null && grant.operation == ShuffleRecoveryClaim && grant.isCurrent =>
+          grant
+        case _ => return Left("provider claim has no current authorization grant")
       }
       val binding = claimed.binding
       val descriptor = claimed.descriptor
@@ -159,7 +175,8 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
           binding.targetShuffleId != reservation.targetShuffleId ||
           binding.recoveryGroup != candidate.recoveryGroup ||
           binding.publishingGeneration != candidate.publishingGeneration ||
-          binding.incarnationId != candidate.incarnationId) {
+          binding.incarnationId != candidate.incarnationId ||
+          binding.attemptInstanceId != request.attemptContext.attemptInstanceId) {
         return Left("provider binding does not correspond to the current reservation")
       }
       if (descriptor.recoveryGroup != candidate.recoveryGroup ||
@@ -167,7 +184,8 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
           descriptor.incarnationId != candidate.incarnationId ||
           descriptor.providerCompatibilityId != candidate.identity.providerCompatibilityId ||
           descriptor.targetShuffleId != request.target.targetShuffleId ||
-          descriptor.descriptorVersion != candidate.descriptorVersion) {
+          descriptor.descriptorVersion != candidate.descriptorVersion ||
+          descriptor.attemptInstanceId != request.attemptContext.attemptInstanceId) {
         return Left("provider claim descriptor does not correspond to the selected candidate")
       }
 
@@ -203,6 +221,10 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
         index += 1
       }
       observer.afterClaimSnapshot()
+
+      if (!request.attemptContext.isActive || !authorizationGrant.isCurrent) {
+        return Left("authorization changed while provider claim metadata was validated")
+      }
 
       val prepared = new Array[ShuffleRecoveryPreparedMap](snapshots.length)
       val seen = mutable.BitSet.empty
@@ -252,6 +274,9 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
       if (seen.size != candidate.mapperCount || prepared.exists(_ == null)) {
         return Left("provider claim does not cover every expected mapper exactly once")
       }
+      if (!request.attemptContext.isActive || !authorizationGrant.isCurrent) {
+        return Left("authorization changed before prepared adoption was created")
+      }
       Right(PreparedShuffleRecoveryAdoption(
         reservation,
         binding,
@@ -262,7 +287,9 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
         request.target.targetShuffleId,
         candidate.mapperCount,
         candidate.reducerCount,
-        prepared.toVector))
+        prepared.toVector,
+        Some(request.attemptContext),
+        Some(authorizationGrant)))
     } catch {
       case NonFatal(_) => Left("provider claim failed bounded validation")
     }

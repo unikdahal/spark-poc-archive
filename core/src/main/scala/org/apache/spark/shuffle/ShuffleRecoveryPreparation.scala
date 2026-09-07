@@ -56,10 +56,28 @@ private[spark] final case class ShuffleRecoveryFeasibilityInputs(
 }
 
 private[spark] final case class ShuffleRecoveryPreparationRequest(
-    recoveryGroup: String,
-    currentGeneration: Long,
+    attemptContext: ShuffleRecoveryAttemptContext,
     target: ShuffleRecoveryAdoptionTarget,
-    feasibility: ShuffleRecoveryFeasibilityInputs)
+    feasibility: ShuffleRecoveryFeasibilityInputs) {
+
+  def recoveryGroup: String = attemptContext.recoveryGroup
+
+  def currentGeneration: Long = attemptContext.generation
+}
+
+private[spark] object ShuffleRecoveryPreparationRequest {
+  /** Feasibility-only compatibility constructor for frozen recovery tests. */
+  private[shuffle] def apply(
+      recoveryGroup: String,
+      currentGeneration: Long,
+      target: ShuffleRecoveryAdoptionTarget,
+      feasibility: ShuffleRecoveryFeasibilityInputs): ShuffleRecoveryPreparationRequest = {
+    ShuffleRecoveryPreparationRequest(
+      ShuffleRecoveryAttemptContext.legacyFeasibility(recoveryGroup, currentGeneration),
+      target,
+      feasibility)
+  }
+}
 
 /**
  * Single-use local reservation for one asynchronous recovery decision.
@@ -274,5 +292,78 @@ private[shuffle] final class ShuffleRecoveryManifestCandidateLookup(
       identity: ShuffleRecoveryFeasibilityIdentity,
       currentGeneration: Long): Option[ShuffleRecoveryManifest] = {
     store.findCompatible(recoveryGroup, identity, currentGeneration)
+  }
+}
+
+private[spark] sealed trait ShuffleRecoveryAuthorizedLookupResult
+private[spark] final case class ShuffleRecoveryAuthorizedCandidate(
+    manifest: ShuffleRecoveryManifest,
+    authorizationGrant: ShuffleRecoveryAuthorizationGrant)
+  extends ShuffleRecoveryAuthorizedLookupResult
+private[spark] final case class ShuffleRecoveryAuthorizedMiss(
+    diagnostic: ShuffleRecoveryDiagnostic)
+  extends ShuffleRecoveryAuthorizedLookupResult
+
+/**
+ * Current-policy discovery wrapper around the durable manifest store.
+ *
+ * Authorization and store access are both external operations and therefore stay off the scheduler
+ * event loop. Stop or revocation racing a blocked lookup invalidates the late result locally.
+ */
+private[spark] final class ShuffleRecoveryAuthorizedCandidateLookup(
+    delegate: ShuffleRecoveryCandidateLookup,
+    authority: ShuffleRecoveryAuthorizationAuthority,
+    nowEpochMillis: () => Long = () => System.currentTimeMillis()) {
+
+  if (delegate == null || authority == null || nowEpochMillis == null) {
+    throw new IllegalArgumentException("authorized candidate lookup dependencies must not be null")
+  }
+
+  def findCompatible(
+      context: ShuffleRecoveryAttemptContext,
+      identity: ShuffleRecoveryFeasibilityIdentity): ShuffleRecoveryAuthorizedLookupResult = {
+    ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery candidate lookup")
+    if (context == null || identity == null || !context.isActive) {
+      return ShuffleRecoveryAuthorizedMiss(ShuffleRecoveryDiagnostic(
+        ShuffleRecoveryContextUnavailable,
+        "lookup-context-unavailable"))
+    }
+    if (context.generation <= 0L) {
+      return ShuffleRecoveryAuthorizedMiss(ShuffleRecoveryDiagnostic(
+        ShuffleRecoveryGenerationInvalid,
+        "lookup-generation-invalid"))
+    }
+    if (context.retentionExpired(nowEpochMillis())) {
+      return ShuffleRecoveryAuthorizedMiss(ShuffleRecoveryDiagnostic(
+        ShuffleRecoveryRetentionExpired,
+        "lookup-retention-expired"))
+    }
+    val grant = context.authorize(authority, ShuffleRecoveryDiscover) match {
+      case Right(value) => value
+      case Left(diagnostic) => return ShuffleRecoveryAuthorizedMiss(diagnostic)
+    }
+    val candidate = delegate.findCompatible(
+      context.recoveryGroup,
+      identity,
+      context.generation)
+    if (!context.isActive || !grant.isCurrent) {
+      ShuffleRecoveryAuthorizedMiss(ShuffleRecoveryDiagnostic(
+        ShuffleRecoveryAuthorizationRejected,
+        "lookup-result-became-stale"))
+    } else {
+      candidate match {
+        case Some(manifest) if manifest.generation > 0L &&
+            manifest.generation < context.generation =>
+          ShuffleRecoveryAuthorizedCandidate(manifest, grant)
+        case Some(_) =>
+          ShuffleRecoveryAuthorizedMiss(ShuffleRecoveryDiagnostic(
+            ShuffleRecoveryGenerationInvalid,
+            "candidate-generation-not-earlier"))
+        case None =>
+          ShuffleRecoveryAuthorizedMiss(ShuffleRecoveryDiagnostic(
+            ShuffleRecoverySemanticIdentityMiss,
+            "no-compatible-candidate"))
+      }
+    }
   }
 }

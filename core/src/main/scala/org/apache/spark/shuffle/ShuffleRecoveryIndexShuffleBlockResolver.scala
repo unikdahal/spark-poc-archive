@@ -82,7 +82,8 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
     if (targetShuffleId < 0 || provider == null || binding == null || maps == null ||
         binding.targetShuffleId != targetShuffleId || mapperCount < 0 || reducerCount <= 0 ||
         localBindingGeneration <= 0L || maps.size != mapperCount ||
-        maps.indices.exists(index => maps(index) == null || maps(index).mapIndex != index)) {
+        maps.indices.exists(index => maps(index) == null || maps(index).mapIndex != index) ||
+        !provider.isBound(binding)) {
       false
     } else {
       val candidate = new RecoveredReadBinding(
@@ -222,8 +223,8 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
         }
 
       case batch: ShuffleBlockBatchId if recoveredBindings.containsKey(batch.shuffleId) =>
-        // The Phase 0 reference binding intentionally disables batch fetch so every provider read
-        // retains exact reducer addressing. A scalable batched representation is a later design.
+        // The reference binding intentionally disables batch fetch so every provider read retains
+        // exact reducer addressing. A scalable representation is selected by the later read model.
         throw new IOException("batch fetch is disabled for an adopted reference shuffle")
 
       case _ =>

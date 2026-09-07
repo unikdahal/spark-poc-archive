@@ -18,14 +18,45 @@
 package org.apache.spark.shuffle
 
 private[spark] final case class ShuffleRecoveryClaimRequest(
-    recoveryGroup: String,
+    attemptContext: ShuffleRecoveryAttemptContext,
     publishingGeneration: Long,
     incarnationId: String,
     providerCompatibilityId: String,
     targetShuffleId: Int,
     mapperCount: Int,
     reducerCount: Int,
-    mapArtifacts: Vector[ShuffleRecoveryMapArtifact])
+    mapArtifacts: Vector[ShuffleRecoveryMapArtifact]) {
+
+  def recoveryGroup: String = attemptContext.recoveryGroup
+}
+
+private[spark] object ShuffleRecoveryClaimRequest {
+  /** Feasibility-only compatibility constructor for frozen recovery tests. */
+  private[shuffle] def apply(
+      recoveryGroup: String,
+      publishingGeneration: Long,
+      incarnationId: String,
+      providerCompatibilityId: String,
+      targetShuffleId: Int,
+      mapperCount: Int,
+      reducerCount: Int,
+      mapArtifacts: Vector[ShuffleRecoveryMapArtifact]): ShuffleRecoveryClaimRequest = {
+    if (publishingGeneration == Long.MaxValue) {
+      throw new IllegalArgumentException("publishing generation has no later attempt generation")
+    }
+    ShuffleRecoveryClaimRequest(
+      ShuffleRecoveryAttemptContext.legacyFeasibility(
+        recoveryGroup,
+        publishingGeneration + 1L),
+      publishingGeneration,
+      incarnationId,
+      providerCompatibilityId,
+      targetShuffleId,
+      mapperCount,
+      reducerCount,
+      mapArtifacts)
+  }
+}
 
 /** Attempt-local provider binding to the replacement driver's current shuffle id. */
 private[spark] final case class ShuffleRecoveryBinding(
@@ -33,7 +64,8 @@ private[spark] final case class ShuffleRecoveryBinding(
     targetShuffleId: Int,
     recoveryGroup: String,
     publishingGeneration: Long,
-    incarnationId: String)
+    incarnationId: String,
+    attemptInstanceId: String = "phase0-feasibility-attempt")
 
 /**
  * Provider-owned metadata is intentionally mutable at this boundary.
@@ -75,12 +107,15 @@ private[spark] final case class ShuffleRecoveryClaimDescriptor(
     targetShuffleId: Int,
     descriptorVersion: Int,
     maps: Array[ShuffleRecoveryClaimedMapDescriptor],
+    attemptInstanceId: String = "phase0-feasibility-attempt",
     statistics: ShuffleRecoveryClaimedStatistics = ShuffleRecoveryClaimedStatistics.Unknown)
 
 private[spark] sealed trait ShuffleRecoveryClaimResult
 private[spark] final case class ShuffleRecoveryClaimed(
     binding: ShuffleRecoveryBinding,
-    descriptor: ShuffleRecoveryClaimDescriptor) extends ShuffleRecoveryClaimResult
+    descriptor: ShuffleRecoveryClaimDescriptor,
+    authorizationGrant: Option[ShuffleRecoveryAuthorizationGrant] = None)
+  extends ShuffleRecoveryClaimResult
 private[spark] case object ShuffleRecoveryClaimMissing extends ShuffleRecoveryClaimResult
 private[spark] case object ShuffleRecoveryClaimCorrupt extends ShuffleRecoveryClaimResult
 private[spark] case object ShuffleRecoveryClaimUnavailable extends ShuffleRecoveryClaimResult
