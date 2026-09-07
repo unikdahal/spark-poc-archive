@@ -292,7 +292,7 @@ Before this report, `spip/shuffle-recovery-phase0` is 12 commits ahead of the fr
 That exceeds the nine-issue final-history target if every follow-up/audit squash is counted as a
 permanent issue-owned integration commit. The extra history includes separately reviewed Phase 0-A
 evidence repair/finalization work, the scheduler wiring follow-up, and the explicitly authorized
-#34 analyzer-hardening follow-up.
+Issue `#34` analyzer-hardening follow-up.
 
 This report does **not** destructively rewrite those already-evidenced commits merely to make the
 counter smaller. Such a rewrite would replace the exact commit lineage referenced by prior Actions
