@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.HexFormat;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.celeborn.client.LifecycleManager;
 import org.apache.celeborn.client.ShuffleClient;
@@ -103,7 +104,7 @@ public final class ColdDriverProviderProbe {
     state.setProperty("partitionId", Integer.toString(PARTITION_ID));
     state.setProperty("payloadBytes", Integer.toString(PAYLOAD.length));
     state.setProperty("payloadSha256", sha256(PAYLOAD));
-    state.setProperty("producerControlReadBytes", Long.toString(controlCounter.bytesRead));
+    state.setProperty("producerControlReadBytes", Long.toString(controlCounter.bytesRead()));
     state.setProperty(
         "producerLifecycleEndpoint", lifecycleManager.getHost() + ":" + lifecycleManager.getPort());
     try (FileOutputStream out = new FileOutputStream(stateFile.toFile())) {
@@ -118,7 +119,7 @@ public final class ColdDriverProviderProbe {
         SHUFFLE_ID,
         PARTITION_ID,
         pushed,
-        controlCounter.bytesRead,
+        controlCounter.bytesRead(),
         sha256(PAYLOAD),
         lifecycleManager.getHost(),
         lifecycleManager.getPort());
@@ -163,23 +164,53 @@ public final class ColdDriverProviderProbe {
             conf,
             new UserIdentifier("shuffle-recovery", "provider-probe"));
     ReadCounter coldCounter = new ReadCounter();
+    byte[] coldRead;
     try {
-      byte[] coldRead = readAll(client, coldCounter);
-      requireSamePayload(coldRead, "fresh-client cold read");
-      System.err.printf(
-          "UNEXPECTED_COLD_READ_SUCCESS bytes=%d payloadSha256=%s%n",
-          coldCounter.bytesRead,
-          sha256(coldRead));
-      System.exit(3);
+      coldRead = readAll(client, coldCounter);
     } catch (Exception failure) {
       System.out.printf(
           "EXPECTED_DISCOVERY_GAP failureType=%s bytesRead=%d message=%s%n",
           failure.getClass().getName(),
-          coldCounter.bytesRead,
+          coldCounter.bytesRead(),
           oneLine(failure.getMessage()));
       System.out.flush();
-      System.exit(0);
+      orderlyReaderShutdown(client, lifecycleManager);
+      return;
     }
+
+    if (coldRead.length == 0) {
+      System.out.printf("EXPECTED_DISCOVERY_GAP_EMPTY_READ bytesRead=%d%n", coldCounter.bytesRead());
+      System.out.flush();
+      orderlyReaderShutdown(client, lifecycleManager);
+      return;
+    }
+
+    if (!MessageDigest.isEqual(PAYLOAD, coldRead)) {
+      System.err.printf(
+          "UNEXPECTED_COLD_READ_WRONG_BYTES bytes=%d metricsBytes=%d payloadSha256=%s%n",
+          coldRead.length,
+          coldCounter.bytesRead(),
+          sha256(coldRead));
+      orderlyReaderShutdown(client, lifecycleManager);
+      System.exit(4);
+    }
+
+    System.err.printf(
+        "UNEXPECTED_COLD_READ_SUCCESS bytes=%d metricsBytes=%d payloadSha256=%s%n",
+        coldRead.length,
+        coldCounter.bytesRead(),
+        sha256(coldRead));
+    orderlyReaderShutdown(client, lifecycleManager);
+    System.exit(3);
+  }
+
+  private static void orderlyReaderShutdown(
+      ShuffleClient client, LifecycleManager lifecycleManager) throws Exception {
+    client.shutdown();
+    lifecycleManager.rpcEnv().shutdown();
+    lifecycleManager.rpcEnv().awaitTermination();
+    System.out.println("READER_SHUTDOWN=ORDERLY_CLIENT_AND_LIFECYCLE_MANAGER");
+    System.out.flush();
   }
 
   private static CelebornConf clientConf(String masterEndpoint) {
@@ -236,14 +267,18 @@ public final class ColdDriverProviderProbe {
   }
 
   private static final class ReadCounter implements MetricsCallback {
-    private long bytesRead;
+    private final AtomicLong bytesRead = new AtomicLong();
 
     @Override
     public void incBytesRead(long bytes) {
-      bytesRead += bytes;
+      bytesRead.addAndGet(bytes);
     }
 
     @Override
     public void incReadTime(long time) {}
+
+    private long bytesRead() {
+      return bytesRead.get();
+    }
   }
 }
