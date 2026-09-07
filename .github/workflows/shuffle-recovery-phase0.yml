@@ -59,6 +59,7 @@ jobs:
       opportunity: ${{ steps.scope.outputs.opportunity }}
       workflow: ${{ steps.scope.outputs.workflow }}
       code: ${{ steps.scope.outputs.code }}
+      evidence_docs: ${{ steps.scope.outputs.evidence_docs }}
     steps:
       - name: Checkout requested head
         uses: actions/checkout@v6
@@ -85,6 +86,7 @@ jobs:
           opportunity=false
           workflow=false
           code=false
+          evidence_docs=false
 
           if grep -q '^\.github/workflows/shuffle-recovery-phase0\.yml$' <<<"${changed}"; then
             workflow=true
@@ -92,6 +94,14 @@ jobs:
             cold=true
             opportunity=true
             code=true
+          fi
+          if grep -q '^docs/shuffle-recovery/phase0/' <<<"${changed}"; then
+            # The frozen package contains decision-bearing measurements, so a documentation change
+            # is evidence-affecting even when it does not change executable source.
+            evidence_docs=true
+            core=true
+            cold=true
+            opportunity=true
           fi
           if grep -q '^core/' <<<"${changed}"; then
             core=true
@@ -125,6 +135,7 @@ jobs:
           echo "opportunity=${opportunity}" >> "${GITHUB_OUTPUT}"
           echo "workflow=${workflow}" >> "${GITHUB_OUTPUT}"
           echo "code=${code}" >> "${GITHUB_OUTPUT}"
+          echo "evidence_docs=${evidence_docs}" >> "${GITHUB_OUTPUT}"
 
   docs:
     name: Evidence package and patch hygiene
@@ -152,18 +163,74 @@ jobs:
         run: |
           set -euo pipefail
           root="docs/shuffle-recovery/phase0"
+          canonical="${root}/opportunity/ISSUE_26_FINAL_EVIDENCE.md"
           test -s "${root}/README.md"
           test -s "${root}/mechanism.md"
           test -s "${root}/audit.md"
           test -s "${root}/summary.json"
+          test -s "${canonical}"
+
+          # Freeze the preregistered opportunity result used by the final decision. Updating this
+          # result requires an explicit workflow review rather than a documentation-only rewrite.
+          test "$(git hash-object "${canonical}")" = \
+            "994dd3396b7996205a55161ec44ef23ea6eb798d"
+
           python -m json.tool "${root}/summary.json" >/dev/null
-          grep -q 'MECHANISM_FEASIBLE / VALUE_GATE_NOT_MET' "${root}/README.md"
-          grep -q '19.4%' "${root}/README.md"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("docs/shuffle-recovery/phase0")
+          summary = json.loads((root / "summary.json").read_text())
+          canonical = (root / "opportunity/ISSUE_26_FINAL_EVIDENCE.md").read_text()
+          readme = (root / "README.md").read_text()
+
+          opportunity = summary["opportunity"]
+          expected = {
+              "actionsRunId": 33963836467,
+              "artifactId": 9969032965,
+              "sqlExecutions": 108,
+              "observedExchanges": 1082,
+              "materiallyCompletedStages": 763,
+              "correlatedStages": 757,
+              "unweightedObservations": 18,
+              "excludedReusedObservations": 307,
+              "completedTaskTimeCorrelationCoveragePct": 99.6,
+              "exactSourceEligibleCountPct": 35.6,
+              "exactSourceEligibleBytesPct": 39.5,
+              "exactSourceEligibleCompletedTaskTimePct": 19.4,
+              "preregisteredValueThresholdPct": 20.0,
+              "failureDistributionProjectionPct": 36.8,
+              "formalValueGateResult": "N/A",
+          }
+          for key, value in expected.items():
+              assert opportunity[key] == value, (key, opportunity[key], value)
+
+          for needle in (
+              "**108 SQL executions**",
+              "1,082 observed gate-rule exchange records",
+              "763 materially completed shuffle-map stages",
+              "757 correlated completed shuffle-map stages",
+              "307 documented excluded/reused exchange observations",
+              "18 explicitly unweighted final-plan exchange observations",
+              "**99.6%**",
+              "**36.8%**",
+              "eligible completed shuffle-map task time: **19.4%**",
+              "value gate remains honestly **N/A**",
+          ):
+              assert needle in canonical, needle
+
+          assert summary["decision"] == "MECHANISM_FEASIBLE_VALUE_GATE_NOT_MET"
+          assert "MECHANISM_FEASIBLE / VALUE_GATE_NOT_MET" in readme
+          assert "Failure-distribution reusable task-time projection | **36.8%**" in readme
+          assert "Formal frozen value-gate result | **N/A**" in readme
+          assert summary["history"]["literalTotalHistoryTargetSatisfied"] is False
+          PY
+
           grep -q '40 + 16R' "${root}/README.md"
           grep -q 'O(M x R)' "${root}/README.md"
           grep -q 'current shuffle id' "${root}/mechanism.md"
           grep -q 'whole fresh map-stage recomputation' "${root}/mechanism.md"
-          grep -q 'literalTotalHistoryTargetSatisfied' "${root}/summary.json"
 
   style:
     name: Global Phase 0 style gate
@@ -455,7 +522,7 @@ jobs:
       - name: Select opportunity corpus
         shell: bash
         env:
-          VALIDATION_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode || 'focused' }}
+          VALIDATION_MODE: ${{ needs.scope.outputs.mode }}
           REQUESTED_CORPUS: ${{ github.event_name == 'workflow_dispatch' && inputs.opportunity_corpus_mode || 'smoke' }}
         run: |
           set -euo pipefail
