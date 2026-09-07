@@ -104,7 +104,8 @@ public final class ColdDriverProviderProbe {
     state.setProperty("payloadBytes", Integer.toString(PAYLOAD.length));
     state.setProperty("payloadSha256", sha256(PAYLOAD));
     state.setProperty("producerControlReadBytes", Long.toString(controlCounter.bytesRead));
-    state.setProperty("producerLifecycleEndpoint", lifecycleManager.getHost() + ":" + lifecycleManager.getPort());
+    state.setProperty(
+        "producerLifecycleEndpoint", lifecycleManager.getHost() + ":" + lifecycleManager.getPort());
     try (FileOutputStream out = new FileOutputStream(stateFile.toFile())) {
       state.store(out, "Celeborn provider probe - contains no credential material");
     }
@@ -170,7 +171,7 @@ public final class ColdDriverProviderProbe {
           coldCounter.bytesRead,
           sha256(coldRead));
       System.exit(3);
-    } catch (Throwable failure) {
+    } catch (Exception failure) {
       System.out.printf(
           "EXPECTED_DISCOVERY_GAP failureType=%s bytesRead=%d message=%s%n",
           failure.getClass().getName(),
