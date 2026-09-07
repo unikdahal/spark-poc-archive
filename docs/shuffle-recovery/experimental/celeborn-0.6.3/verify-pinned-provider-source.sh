@@ -63,6 +63,10 @@ grep -Fq 'applicationMetas.putIfAbsent(applicationMeta.appId(), applicationMeta)
   "${SOURCE}/master/src/main/java/org/apache/celeborn/service/deploy/master/clustermeta/AbstractMetaManager.java"
 grep -Fq 'registeredAppAndShuffles.remove(appId);' \
   "${SOURCE}/master/src/main/java/org/apache/celeborn/service/deploy/master/clustermeta/AbstractMetaManager.java"
+grep -Fq 'statusSystem.handleApplicationMeta(new ApplicationMeta(appId, secret));' \
+  "${SOURCE}/master/src/main/java/org/apache/celeborn/service/deploy/master/MasterSecretRegistryImpl.java"
+grep -Fq 'statusSystem.removeApplicationMeta(appId);' \
+  "${SOURCE}/master/src/main/java/org/apache/celeborn/service/deploy/master/MasterSecretRegistryImpl.java"
 grep -Fq 'if (shuffleIds == null || !shuffleIds.contains(shuffleId)) {' \
   "${SOURCE}/master/src/main/scala/org/apache/celeborn/service/deploy/master/Master.scala"
 grep -Fq '| celeborn.client.application.unregister.enabled | true |' \
