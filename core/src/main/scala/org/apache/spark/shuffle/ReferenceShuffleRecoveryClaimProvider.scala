@@ -25,40 +25,133 @@ import java.security.MessageDigest
 import java.util.{Base64, UUID}
 import java.util.concurrent.ConcurrentHashMap
 
+import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 import org.apache.spark.SparkConf
+import org.apache.spark.network.buffer.ManagedBuffer
 
 /**
- * Reference-provider claim adapter.
+ * Local-filesystem reference implementation of the private durable recovery capability.
  *
  * A binding is an attempt-local alias only. It never moves, rewrites, revokes, or deletes the
- * immutable group-scoped artifacts that it references.
+ * immutable group-scoped artifacts that it references. Group deletion is reachable only through
+ * explicit lifecycle authority or the provider's own retention policy.
  */
 private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     providerRoot: Path,
-    conf: SparkConf = new SparkConf(false)) extends ShuffleRecoveryClaimProvider {
+    conf: SparkConf = new SparkConf(false),
+    retentionMillis: Option[Long] = None) extends DurableShuffleRecoveryProvider {
 
   import ReferenceShuffleRecoveryClaimProvider._
 
-  if (providerRoot == null || conf == null) {
-    throw new IllegalArgumentException("provider root and SparkConf must not be null")
+  if (providerRoot == null || conf == null || retentionMillis == null ||
+      retentionMillis.exists(_ <= 0L)) {
+    throw new IllegalArgumentException(
+      "provider root, SparkConf, and positive retention policy must be valid")
   }
 
   private final class ActiveBinding(
       val binding: ShuffleRecoveryBinding,
       val provider: ReferenceShuffleProvider)
 
+  private final class ReferenceBlockMetadataAdapter(
+      delegate: ReferenceShuffleBlockMetadata) extends DurableShuffleRecoveryBlockMetadata {
+    override val offset: Long = delegate.offset
+    override val length: Long = delegate.length
+  }
+
+  private final class ReferenceResolvedMapAdapter(
+      delegate: ReferenceShuffleResolvedMap) extends DurableShuffleRecoveryResolvedMap {
+    override def numReducers: Int = delegate.numReducers
+    override def dataLength: Long = delegate.dataLength
+    override def indexBytes: Long = delegate.indexBytes
+
+    override def blockMetadata(reduceId: Int): DurableShuffleRecoveryBlockMetadata =
+      new ReferenceBlockMetadataAdapter(delegate.blockMetadata(reduceId))
+
+    override def getBlockData(reduceId: Int): Option[ManagedBuffer] =
+      delegate.getBlockData(reduceId)
+  }
+
+  private val normalizedRoot = providerRoot.toAbsolutePath.normalize()
   private val activeBindings = new ConcurrentHashMap[String, ActiveBinding]()
 
-  override val compatibilityId: String =
+  val compatibilityId: String =
     ShuffleRecoveryFeasibilityIdentity.ProviderCompatibilityId
+
+  override def capabilityDescriptor: DurableShuffleRecoveryCapabilityDescriptor =
+    DurableShuffleRecoveryCapabilityDescriptor(
+      compatibilityId,
+      DurableShuffleRecoveryContract.ContractVersion,
+      DurableShuffleRecoveryContract.ArtifactFormatVersion,
+      DurableShuffleRecoveryContract.ReadVersion,
+      Array(DurableShuffleRecoveryContract.ExactReducerRangeFetch),
+      exactReducerAggregateStatistics = false,
+      mapperLocalBlockMetadataQueryable = true,
+      DurableShuffleRecoveryContract.ExactIndexSha256AndReducerChecksum,
+      immutableIncarnations = true,
+      conditionalRetirement = true,
+      retirementRequiresRevision = false,
+      DurableShuffleRecoveryContract.AttemptBindingIndependentArtifacts,
+      DurableShuffleRecoveryContract.CurrentAttemptAuthorization,
+      ShuffleRecoveryManifestCodec.MaxMaps,
+      ShuffleRecoveryManifestCodec.MaxReducers,
+      DurableShuffleRecoveryContract.MaxMetadataBytes)
+
+  override def certifyWinningSelection(
+      request: DurableShuffleRecoveryCertificationRequest):
+      DurableShuffleRecoveryCertifiedSelection = {
+    ShuffleRecoveryExternalCallGuard.assertAllowed(
+      "shuffle recovery provider winner certification")
+    validateCertificationRequest(request)
+    val capabilities = DurableShuffleRecoveryContract.negotiate(
+      capabilityDescriptor,
+      compatibilityId,
+      request.winningMapTaskIds.size,
+      request.reducerCount) match {
+      case Right(value) => value
+      case Left(reason) => throw new IOException(reason)
+    }
+    val provider = ReferenceShuffleProvider.open(
+      providerRoot,
+      request.recoveryGroup,
+      request.publishingGeneration,
+      request.incarnationId,
+      conf)
+    val artifacts = ShuffleRecoveryWinningSelection.certify(
+      provider,
+      request.winningMapTaskIds,
+      request.reducerCount)
+    if (artifacts.size != request.winningMapTaskIds.size ||
+        artifacts.zip(request.winningMapTaskIds).exists {
+          case (artifact, taskId) => artifact.mapTaskId != taskId
+        }) {
+      throw new IOException("provider certification changed Spark's frozen winner selection")
+    }
+    DurableShuffleRecoveryCertifiedSelection(
+      capabilities.providerCapabilityId,
+      capabilities.contractVersion,
+      capabilities.artifactFormatVersion,
+      capabilities.readVersion,
+      request.winningMapTaskIds,
+      request.reducerCount,
+      artifacts)
+  }
 
   override def claim(request: ShuffleRecoveryClaimRequest): ShuffleRecoveryClaimResult = {
     ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery provider claim")
     validateRequest(request) match {
       case Some(reason) => return ShuffleRecoveryClaimRejected(reason)
       case None =>
+    }
+    val capabilities = DurableShuffleRecoveryContract.negotiate(
+      capabilityDescriptor,
+      request.providerCompatibilityId,
+      request.mapperCount,
+      request.reducerCount) match {
+      case Right(value) => value
+      case Left(reason) => return ShuffleRecoveryClaimRejected(reason)
     }
 
     val provider = openExistingProvider(request) match {
@@ -92,9 +185,9 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
         request.recoveryGroup,
         request.publishingGeneration,
         request.incarnationId,
-        compatibilityId,
+        capabilities.providerCapabilityId,
         request.targetShuffleId,
-        ShuffleRecoveryManifest.DescriptorVersion,
+        capabilities.readVersion,
         maps))
   }
 
@@ -109,6 +202,101 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     }
   }
 
+  override def finishAttempt(): Unit = {
+    ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery provider attempt finish")
+    activeBindings.clear()
+  }
+
+  override def finishGroup(
+      authority: DurableShuffleRecoveryGroupLifecycleAuthority):
+      DurableShuffleRecoveryGroupFinishResult = {
+    ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery provider group finish")
+    if (authority == null || !safeIdentifier(authority.recoveryGroup)) {
+      return DurableShuffleRecoveryGroupFinishRefused
+    }
+    if (hasActiveBindingFor(authority.recoveryGroup, None)) {
+      return DurableShuffleRecoveryGroupFinishRefused
+    }
+    val group = groupPath(authority.recoveryGroup)
+    try {
+      if (!Files.exists(group, LinkOption.NOFOLLOW_LINKS)) {
+        DurableShuffleRecoveryGroupAlreadyAbsent
+      } else if (!Files.isDirectory(group, LinkOption.NOFOLLOW_LINKS) ||
+          Files.isSymbolicLink(group)) {
+        DurableShuffleRecoveryGroupFinishRefused
+      } else {
+        ReferenceShuffleProvider.deleteRecursively(group)
+        DurableShuffleRecoveryGroupFinished
+      }
+    } catch {
+      case _: IOException => DurableShuffleRecoveryGroupFinishUnavailable
+      case _: SecurityException => DurableShuffleRecoveryGroupFinishUnavailable
+    }
+  }
+
+  override def retireExact(
+      request: DurableShuffleRecoveryRetirementRequest):
+      DurableShuffleRecoveryRetirementResult = {
+    ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery provider exact retirement")
+    if (!validRetirementRequest(request) ||
+        hasActiveBindingFor(
+          request.recoveryGroup,
+          Some(request.publishingGeneration -> request.incarnationId))) {
+      return DurableShuffleRecoveryArtifactRetirementRefused
+    }
+    val incarnation = incarnationPath(
+      request.recoveryGroup,
+      request.publishingGeneration,
+      request.incarnationId)
+    try {
+      if (!Files.exists(incarnation, LinkOption.NOFOLLOW_LINKS)) {
+        DurableShuffleRecoveryArtifactAlreadyAbsent
+      } else if (!Files.isDirectory(incarnation, LinkOption.NOFOLLOW_LINKS) ||
+          Files.isSymbolicLink(incarnation)) {
+        DurableShuffleRecoveryArtifactRetirementRefused
+      } else {
+        ReferenceShuffleProvider.deleteRecursively(incarnation)
+        DurableShuffleRecoveryArtifactRetired
+      }
+    } catch {
+      case _: IOException => DurableShuffleRecoveryArtifactRetirementUnavailable
+      case _: SecurityException => DurableShuffleRecoveryArtifactRetirementUnavailable
+    }
+  }
+
+  /**
+   * Runs the reference provider's optional abandoned-group TTL policy.
+   *
+   * This is provider-owned retention, not a Spark lease heartbeat. Active bindings in this driver
+   * prevent local expiry; a real remote implementation is responsible for its own global policy.
+   */
+  private[shuffle] def expireAbandonedGroup(
+      recoveryGroup: String,
+      nowMillis: Long): Boolean = {
+    ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery provider retention sweep")
+    val ttl = retentionMillis.getOrElse(return false)
+    if (!safeIdentifier(recoveryGroup) || nowMillis < 0L ||
+        hasActiveBindingFor(recoveryGroup, None)) {
+      return false
+    }
+    val group = groupPath(recoveryGroup)
+    if (!Files.isDirectory(group, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(group)) {
+      return false
+    }
+    val modified = Files.getLastModifiedTime(group, LinkOption.NOFOLLOW_LINKS).toMillis
+    val age = try {
+      Math.subtractExact(nowMillis, modified)
+    } catch {
+      case _: ArithmeticException => return false
+    }
+    if (age < ttl) {
+      false
+    } else {
+      ReferenceShuffleProvider.deleteRecursively(group)
+      true
+    }
+  }
+
   private[shuffle] def isBound(binding: ShuffleRecoveryBinding): Boolean = {
     if (binding == null) {
       false
@@ -118,9 +306,9 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     }
   }
 
-  private[shuffle] def openBoundMap(
+  private[shuffle] override def openBoundMap(
       binding: ShuffleRecoveryBinding,
-      mapIndex: Int): ReferenceShuffleResolvedMap = {
+      mapIndex: Int): DurableShuffleRecoveryResolvedMap = {
     ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery bound map open")
     if (binding == null) {
       throw new IllegalArgumentException("shuffle recovery binding must not be null")
@@ -129,7 +317,7 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     if (active == null || active.binding != binding) {
       throw new IOException("shuffle recovery binding is not active")
     }
-    active.provider.openMap(mapIndex)
+    new ReferenceResolvedMapAdapter(active.provider.openMap(mapIndex))
   }
 
   /**
@@ -139,7 +327,7 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
    * failure is deliberately classified as unavailable unless a fresh examination proves that the
    * immutable winner, data, or exact index is missing or has changed.
    */
-  private[shuffle] def openBoundMapForFetch(
+  private[shuffle] override def openBoundMapForFetch(
       binding: ShuffleRecoveryBinding,
       mapIndex: Int,
       expected: ShuffleRecoveryPreparedMap): ShuffleRecoveryBoundMapReadResult = {
@@ -177,26 +365,17 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
         resolved.indexBytes != expected.indexLength) {
       ShuffleRecoveryBoundMapFailed(ShuffleRecoveryAdoptedCorrupt)
     } else {
-      ShuffleRecoveryBoundMapOpened(resolved)
+      ShuffleRecoveryBoundMapOpened(new ReferenceResolvedMapAdapter(resolved))
     }
   }
 
   private def openExistingProvider(
       request: ShuffleRecoveryClaimRequest):
       Either[ShuffleRecoveryClaimResult, ReferenceShuffleProvider] = {
-    val normalizedRoot = providerRoot.toAbsolutePath.normalize()
-    val group = Base64.getUrlEncoder.withoutPadding().encodeToString(
-      request.recoveryGroup.getBytes(StandardCharsets.UTF_8))
-    val incarnation = Base64.getUrlEncoder.withoutPadding().encodeToString(
-      request.incarnationId.getBytes(StandardCharsets.UTF_8))
-    val incarnationDirectory = normalizedRoot
-      .resolve(group)
-      .resolve(request.publishingGeneration.toString)
-      .resolve(incarnation)
-    if (!incarnationDirectory.normalize().startsWith(normalizedRoot)) {
-      return Left(ShuffleRecoveryClaimRejected(
-        "provider claim namespace escapes the configured root"))
-    }
+    val incarnationDirectory = incarnationPath(
+      request.recoveryGroup,
+      request.publishingGeneration,
+      request.incarnationId)
     val requiredDirectories = Seq(
       incarnationDirectory,
       incarnationDirectory.resolve(".attempts"),
@@ -323,6 +502,25 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     }
   }
 
+  private def validateCertificationRequest(
+      request: DurableShuffleRecoveryCertificationRequest): Unit = {
+    if (request == null || request.winningMapTaskIds == null ||
+        !safeIdentifier(request.recoveryGroup) || !safeIdentifier(request.incarnationId)) {
+      throw new IllegalArgumentException("winner certification request contains an invalid field")
+    }
+    if (request.publishingGeneration <= 0L ||
+        request.winningMapTaskIds.size > ShuffleRecoveryManifestCodec.MaxMaps ||
+        request.winningMapTaskIds.exists(_ < 0L) ||
+        request.winningMapTaskIds.distinct.size != request.winningMapTaskIds.size) {
+      throw new IllegalArgumentException("winner certification request has an invalid selection")
+    }
+    if (request.reducerCount <= 0 ||
+        request.reducerCount > ShuffleRecoveryManifestCodec.MaxReducers) {
+      throw new IllegalArgumentException(
+        "winner certification request has an invalid reducer shape")
+    }
+  }
+
   private def validateRequest(request: ShuffleRecoveryClaimRequest): Option[String] = {
     if (request == null || request.recoveryGroup == null || request.incarnationId == null ||
         request.providerCompatibilityId == null || request.mapArtifacts == null) {
@@ -330,8 +528,6 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     } else if (!safeIdentifier(request.recoveryGroup) ||
         !safeIdentifier(request.incarnationId)) {
       Some("claim request contains an invalid provider namespace")
-    } else if (request.providerCompatibilityId != compatibilityId) {
-      Some("provider compatibility id does not match the reference provider")
     } else if (request.publishingGeneration <= 0L || request.targetShuffleId < 0) {
       Some("claim request contains an invalid generation or target shuffle id")
     } else if (request.mapperCount < 0 ||
@@ -346,13 +542,65 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     }
   }
 
+  private def validRetirementRequest(
+      request: DurableShuffleRecoveryRetirementRequest): Boolean = {
+    request != null &&
+      request.examinedRevision != null &&
+      safeIdentifier(request.recoveryGroup) &&
+      safeIdentifier(request.incarnationId) &&
+      request.publishingGeneration > 0L &&
+      request.examinedRevision.forall { revision =>
+        revision != null && revision.nonEmpty &&
+          revision.getBytes(StandardCharsets.UTF_8).length <=
+            DurableShuffleRecoveryContract.MaxCapabilityStringBytes
+      }
+  }
+
   private def safeIdentifier(value: String): Boolean = {
     try {
-      ShuffleRecoveryManifestCodec.validateIdentifier(value, "provider claim identifier")
+      ShuffleRecoveryManifestCodec.validateIdentifier(value, "provider recovery identifier")
       true
     } catch {
       case NonFatal(_) => false
     }
+  }
+
+  private def hasActiveBindingFor(
+      recoveryGroup: String,
+      exact: Option[(Long, String)]): Boolean = {
+    activeBindings.values().asScala.exists { active =>
+      active.binding.recoveryGroup == recoveryGroup && exact.forall {
+        case (generation, incarnationId) =>
+          active.binding.publishingGeneration == generation &&
+            active.binding.incarnationId == incarnationId
+      }
+    }
+  }
+
+  private def groupPath(recoveryGroup: String): Path = {
+    val encoded = Base64.getUrlEncoder.withoutPadding().encodeToString(
+      recoveryGroup.getBytes(StandardCharsets.UTF_8))
+    val group = normalizedRoot.resolve(encoded).normalize()
+    if (!group.startsWith(normalizedRoot)) {
+      throw new IllegalArgumentException("provider recovery group escapes configured root")
+    }
+    group
+  }
+
+  private def incarnationPath(
+      recoveryGroup: String,
+      publishingGeneration: Long,
+      incarnationId: String): Path = {
+    val encodedIncarnation = Base64.getUrlEncoder.withoutPadding().encodeToString(
+      incarnationId.getBytes(StandardCharsets.UTF_8))
+    val incarnation = groupPath(recoveryGroup)
+      .resolve(publishingGeneration.toString)
+      .resolve(encodedIncarnation)
+      .normalize()
+    if (!incarnation.startsWith(normalizedRoot)) {
+      throw new IllegalArgumentException("provider incarnation escapes configured root")
+    }
+    incarnation
   }
 
   private def inspectMap(
