@@ -329,10 +329,14 @@ private[spark] final case class ShuffleRecoveryGroupCompletion(
     authorization: ShuffleRecoveryAuthorizationContext)
 
 private[spark] sealed trait ShuffleRecoveryGroupFinishResult
-private[spark] case object ShuffleRecoveryGroupFinished extends ShuffleRecoveryGroupFinishResult
-private[spark] case object ShuffleRecoveryGroupAlreadyFinished extends ShuffleRecoveryGroupFinishResult
-private[spark] case object ShuffleRecoveryGroupFinishRejected extends ShuffleRecoveryGroupFinishResult
-private[spark] case object ShuffleRecoveryGroupFinishUnavailable extends ShuffleRecoveryGroupFinishResult
+private[spark] case object ShuffleRecoveryGroupFinished
+  extends ShuffleRecoveryGroupFinishResult
+private[spark] case object ShuffleRecoveryGroupAlreadyFinished
+  extends ShuffleRecoveryGroupFinishResult
+private[spark] case object ShuffleRecoveryGroupFinishRejected
+  extends ShuffleRecoveryGroupFinishResult
+private[spark] case object ShuffleRecoveryGroupFinishUnavailable
+  extends ShuffleRecoveryGroupFinishResult
 
 /** External durable cleanup surface. It must be idempotent and incarnation-safe. */
 private[shuffle] trait ShuffleRecoveryGroupFinisher {
@@ -495,7 +499,8 @@ private[spark] final class ShuffleRecoveryAttemptLifecycle(
   }
 
   private def authorizeCurrent(
-      action: ShuffleRecoveryAuthorizationAction): Either[ShuffleRecoveryAttemptDiagnostic, Long] = {
+      action: ShuffleRecoveryAuthorizationAction):
+      Either[ShuffleRecoveryAttemptDiagnostic, Long] = {
     if (isStopped) {
       Left(ShuffleRecoveryContextUnavailable)
     } else {
