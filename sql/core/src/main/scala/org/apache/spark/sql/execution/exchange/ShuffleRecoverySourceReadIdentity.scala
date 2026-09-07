@@ -34,6 +34,7 @@ import org.apache.spark.sql.execution.{ExecSubqueryExpression, RangeExec, SparkP
  * Generic recovery code may inspect only the envelope fields below. The bytes themselves are
  * source-specific and intentionally have no generic decoder. Adapters must describe the exact
  * immutable logical data view read by the already-resolved scan, not merely a mutable namespace.
+ * A token is neither an authorization decision nor a lease over the underlying source.
  */
 private[sql] final class ShuffleRecoverySourceToken private (
     val schemaVersion: Int,
@@ -51,8 +52,6 @@ private[sql] final class ShuffleRecoverySourceToken private (
     case that: ShuffleRecoverySourceToken =>
       schemaVersion == that.schemaVersion &&
         adapterId == that.adapterId &&
-        diagnosticCategory == that.diagnosticCategory &&
-        diagnosticSummary == that.diagnosticSummary &&
         decomposition == that.decomposition &&
         Arrays.equals(ownedTokenBytes, that.ownedTokenBytes)
     case _ => false
@@ -61,8 +60,6 @@ private[sql] final class ShuffleRecoverySourceToken private (
   override def hashCode(): Int = {
     var result = schemaVersion
     result = 31 * result + adapterId.hashCode
-    result = 31 * result + diagnosticCategory.hashCode
-    result = 31 * result + diagnosticSummary.hashCode
     result = 31 * result + decomposition.hashCode
     31 * result + Arrays.hashCode(ownedTokenBytes)
   }
@@ -168,6 +165,15 @@ private[sql] final case class ShuffleRecoverySourceTokenCandidate(
     diagnosticSummary: Option[String] = None,
     decompositionCertificate: Option[Array[Byte]] = None)
 
+private[sql] sealed trait ShuffleRecoverySourceAdapterResult
+
+private[sql] object ShuffleRecoverySourceAdapterResult {
+  final case class Candidate(value: ShuffleRecoverySourceTokenCandidate)
+    extends ShuffleRecoverySourceAdapterResult
+
+  case object Unavailable extends ShuffleRecoverySourceAdapterResult
+}
+
 private[sql] trait ShuffleRecoverySourceReadAdapter {
   def planClass: Class[_ <: SparkPlan]
   def adapterId: String
@@ -178,7 +184,7 @@ private[sql] trait ShuffleRecoverySourceReadAdapter {
    * Implementations must not mutate the plan/source. Adapters that need future external I/O must
    * perform it before scheduler adoption and hand the resulting local token to recovery code.
    */
-  def sourceToken(plan: SparkPlan): ShuffleRecoverySourceTokenCandidate
+  def sourceToken(plan: SparkPlan): ShuffleRecoverySourceAdapterResult
 }
 
 /**
@@ -200,12 +206,17 @@ private[sql] final class ShuffleRecoverySourceAdapterRegistry private (
       adaptersByClass.get(plan.getClass) match {
         case None => Miss(UnknownSource)
         case Some(adapter) =>
-          val candidate = try {
+          val adapterResult = try {
             adapter.sourceToken(plan)
           } catch {
             case NonFatal(_) => return Miss(AdapterFailed)
           }
-          ShuffleRecoverySourceReadIdentity.validateCandidate(candidate, adapterIds, bounds)
+          adapterResult match {
+            case null => Miss(NullCandidate)
+            case ShuffleRecoverySourceAdapterResult.Unavailable => Miss(SourceViewUnavailable)
+            case ShuffleRecoverySourceAdapterResult.Candidate(candidate) =>
+              ShuffleRecoverySourceReadIdentity.validateCandidate(candidate, adapterIds, bounds)
+          }
       }
     }
   }
@@ -350,10 +361,10 @@ private[sql] object ShuffleRecoverySourceReadIdentity {
     override val planClass: Class[_ <: SparkPlan] = classOf[RangeExec]
     override val adapterId: String = "spark.range.v1"
 
-    override def sourceToken(plan: SparkPlan): ShuffleRecoverySourceTokenCandidate = {
+    override def sourceToken(plan: SparkPlan): ShuffleRecoverySourceAdapterResult = {
       val range = plan.asInstanceOf[RangeExec]
       if (range.numSlices <= 0) {
-        return null
+        return ShuffleRecoverySourceAdapterResult.Unavailable
       }
 
       val token = canonicalBytes { out =>
@@ -372,13 +383,14 @@ private[sql] object ShuffleRecoverySourceReadIdentity {
         out.writeLong(range.step)
       })
 
-      ShuffleRecoverySourceTokenCandidate(
-        schemaVersion = CurrentTokenSchemaVersion,
-        adapterId = adapterId,
-        canonicalBytes = token,
-        diagnosticCategory = Some("synthetic-range"),
-        diagnosticSummary = None,
-        decompositionCertificate = Some(decomposition))
+      ShuffleRecoverySourceAdapterResult.Candidate(
+        ShuffleRecoverySourceTokenCandidate(
+          schemaVersion = CurrentTokenSchemaVersion,
+          adapterId = adapterId,
+          canonicalBytes = token,
+          diagnosticCategory = Some("synthetic-range"),
+          diagnosticSummary = None,
+          decompositionCertificate = Some(decomposition)))
     }
   }
 
