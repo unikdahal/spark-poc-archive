@@ -6,13 +6,13 @@ cohort.
 
 The workload is an explicit deterministic scenario, not a production trace and not a claim about a
 particular Spark deployment. The real-source campaign binds the logical tables below to explicit
-Apache Iceberg snapshot ids. The exact snapshot ids, table metadata locations, file manifests, Spark
+Apache Iceberg snapshot ids. Exact snapshot ids, table metadata locations, file manifests, Spark
 build SHA, provider build/version, cluster image digest, and source decomposition are recorded with
-the later campaign artifacts; they are not invented in this preregistration.
+the later campaign artifacts; they are not invented here.
 
 ## Dataset contract
 
-The benchmark harness exposes two snapshot-pinned read-only relations to the SQL corpus:
+The benchmark harness exposes two snapshot-pinned read-only relations:
 
 ```text
 sr_fact(
@@ -32,12 +32,12 @@ sr_dim(
 )
 ```
 
-`sr_fact` is the only relation allowed below an adopted producer. `sr_dim` is used only by a
-supported downstream consumer and is read normally by the replacement execution.
+`sr_fact` is the only relation allowed below an adopted producer. `sr_dim` is used only by supported
+downstream join consumers and is read normally by the replacement execution.
 
 For reproducibility, synthetic row content is generated deterministically from ascending
 `event_id`; no runtime clock, random source, user-defined function, or mutable external lookup is
-used. The data generator version is `decision-support-generator-v1` and uses these value rules:
+used. Generator version `decision-support-generator-v1` uses:
 
 ```text
 tenant_id    = event_id mod 131072
@@ -52,39 +52,40 @@ sr_dim.region_id     = dimension_id mod 64
 sr_dim.segment_id    = dimension_id mod 256
 ```
 
-The generator materializes immutable Iceberg snapshots before any timed run. It may use generator
-implementation details that are not themselves part of the query-under-test, but the resulting
-snapshot ids and metadata/file manifests are fixed for every paired comparison.
+The generator materializes immutable Iceberg snapshots before any timed run. Generator internals are
+not part of the query-under-test, but resulting snapshot ids and metadata/file manifests are fixed
+for every paired comparison.
 
-The primary fact-input scale variants are 16 GiB, 64 GiB, 256 GiB, and 512 GiB of Iceberg data-file
-bytes, each within +/-2% of the registered target. The dimension snapshot is 8 GiB +/-2%. The later
-campaign records both table data-file bytes and actual bytes read by Spark so column pruning or
-predicate effects are visible rather than inferred.
+Primary fact-input scales are 16 GiB, 64 GiB, 256 GiB, and 512 GiB of Iceberg data-file bytes, each
+within +/-2% of the registered target. The dimension snapshot is 8 GiB +/-2%. The campaign records
+both table data-file bytes and actual bytes read by Spark so column pruning and predicate effects are
+visible rather than inferred.
 
-The nominal target deployment profile is the 256 GiB fact snapshot. The other registered input
-sizes establish the supported scaling envelope without changing SQL text or shuffle settings.
+The nominal target deployment profile is the 256 GiB fact snapshot. Other registered sizes establish
+the scaling envelope without changing SQL text or shuffle settings.
 
 ## Default-plan rule
 
-Primary evidence uses the tested Spark build's defaults for adaptive execution and shuffle
-partition count. In particular, the campaign does not set `spark.sql.adaptive.enabled`,
-`spark.sql.shuffle.partitions`, `spark.sql.autoBroadcastJoinThreshold`, or AQE broadcast/coalescing
-thresholds merely to manufacture the requested plan.
+Primary evidence uses the tested Spark build's defaults for adaptive execution, shuffle partition
+count, broadcast thresholds, and AQE thresholds. It does not set
+`spark.sql.adaptive.enabled`, `spark.sql.shuffle.partitions`,
+`spark.sql.autoBroadcastJoinThreshold`, or an AQE broadcast/coalescing threshold merely to
+manufacture a requested plan.
 
 For the frozen baseline lineage, the ordinary SQL shuffle partition default is 200 and AQE is on by
-default. A primary row is accepted only if the actual physical plan still contains the intended
-producer under those defaults. The exact initial reducer count, final AQE partition specs, query
-stage plan, and adaptive-plan changes are captured for every run.
+default. A primary row is admitted only if its actual physical plan contains the intended target
+producer under those defaults. Exact initial reducer count, final AQE partition specs, query-stage
+plan, and adaptive-plan changes are captured for every run.
 
-A forced shuffle count, disabled AQE, disabled broadcast, join hint, repartition hint, or similar
+A forced shuffle count, disabled AQE, disabled broadcast, join/repartition hint, or similar
 plan-shaping control is a separately labelled mechanism experiment and is excluded from headline
 value, overhead, and economics gates.
 
 ## Supported mapper/reducer envelopes
 
-Mapper decomposition comes from the certified resolved source, not from a benchmark-side
-`repartition` call. The source certification step must report the ordered mapper decomposition
-before a row is admitted to the timed campaign.
+Mapper decomposition comes from the certified resolved source, never from a benchmark-side
+`repartition` call. Source certification reports the ordered mapper decomposition before a row is
+admitted to timed execution.
 
 | Scale id | Fact data-file bytes | Accepted mapper count M | Hash producer R | Single producer R |
 | --- | ---: | ---: | ---: | ---: |
@@ -93,62 +94,55 @@ before a row is admitted to the timed campaign.
 | `I256` | 256 GiB +/-2% | 1,536-2,560 | 200 | 1 |
 | `I512` | 512 GiB +/-2% | 3,072-5,120 | 200 | 1 |
 
-The reducer counts above describe the target exchange's initial `ShuffleDependency`, not the number
-of post-shuffle reader partitions after AQE coalescing. AQE remains enabled and its final partition
-specs are evidence, not something this table forces to remain equal to R.
+These reducer counts describe the target exchange's initial `ShuffleDependency`, not post-shuffle
+reader partitions after AQE. AQE stays enabled and its final partition specs are evidence, not
+something this table forces to remain equal to R.
 
-If a snapshot's default source planning falls outside its registered mapper envelope or a hash
-exchange does not have the default 200 reducers, that `(workload, scale)` row is `NOT_APPLICABLE` for
-primary evidence. The benchmark may not change source split or shuffle settings after observing
-performance to force it into the envelope.
+If default source planning falls outside the registered mapper envelope, or a hash target does not
+have the default 200 reducers, that `(workload, scale)` row is `NOT_APPLICABLE` for primary evidence.
+Source split or shuffle settings may not be changed after performance observation to force it into
+the envelope.
 
 Mechanism-only probes may explicitly force alternative shapes, including 8,192 x 1,024 and
 4,096 x 2,048. They are labelled and excluded from primary aggregate gates.
 
+## Why aggregates are not target producers
+
+Spark normally implements a grouped or global aggregate with partial aggregation below its shuffle
+exchange. Such an exchange therefore does **not** satisfy this campaign's first-producer grammar of
+certified scan plus optional filter/project followed directly by hash or single partitioning.
+
+Aggregates remain valid downstream consumers, but an aggregate exchange itself is not an adoption
+target in v1. The primary corpus therefore obtains target exchanges from distribution requirements
+of Window and sort-merge join operators, where the target side can remain scan/filter/project only.
+
 ## Exact primary corpus
 
-The six SQL templates below are the complete primary corpus. The logical view names are stable; the
-campaign harness binds them to the exact registered snapshot-pinned relations before parsing the SQL.
+The six SQL templates below are the complete primary corpus. Logical view names are stable; the
+campaign harness binds them to exact registered snapshot-pinned relations before parsing the SQL.
+Every query returns a small final result so incremental external result delivery is not part of the
+measured mechanism.
 
-### G01 - grouped aggregate consumer
+### W01 - tenant-partitioned Window
 
-Scenario weight: **25%**.
-
-```sql
-SELECT tenant_id, SUM(metric_value) AS metric_sum
-FROM sr_fact
-WHERE day_id BETWEEN 4 AND 27
-GROUP BY tenant_id
-```
-
-Intended target producer:
-
-```text
-snapshot scan sr_fact
-  -> filter day_id BETWEEN 4 AND 27
-  -> project tenant_id, metric_value
-  -> hash exchange on tenant_id
-```
-
-The grouped aggregate is downstream of the target exchange and executes under current Spark
-semantics.
-
-### W01 - partitioned window consumer
-
-Scenario weight: **15%**.
+Scenario weight: **20%**.
 
 ```sql
-SELECT
-  tenant_id,
-  event_id,
-  ROW_NUMBER() OVER (
-    PARTITION BY tenant_id
-    ORDER BY sequence_id, event_id) AS rn
-FROM sr_fact
-WHERE day_id BETWEEN 4 AND 27
+WITH ranked AS (
+  SELECT
+    tenant_id,
+    event_id,
+    ROW_NUMBER() OVER (
+      PARTITION BY tenant_id
+      ORDER BY sequence_id, event_id) AS rn
+  FROM sr_fact
+  WHERE day_id BETWEEN 4 AND 27
+)
+SELECT MAX(rn) AS max_tenant_rows
+FROM ranked
 ```
 
-Intended target producer:
+Target producer:
 
 ```text
 snapshot scan sr_fact
@@ -157,45 +151,80 @@ snapshot scan sr_fact
   -> hash exchange on tenant_id
 ```
 
-Window sorting and window evaluation are downstream. No Window operator is part of the reusable
-producer.
+Window sort/evaluation and the final result reduction are downstream. No aggregate or Window operator
+is part of the reusable producer.
 
-### S01 - single-partition global aggregate consumer
+### W02 - dimension-partitioned Window
+
+Scenario weight: **15%**.
+
+```sql
+WITH ranked AS (
+  SELECT
+    dimension_id,
+    event_id,
+    DENSE_RANK() OVER (
+      PARTITION BY dimension_id
+      ORDER BY metric_value, event_id) AS rk
+  FROM sr_fact
+  WHERE day_id BETWEEN 8 AND 15
+)
+SELECT MAX(rk) AS max_dimension_rank
+FROM ranked
+```
+
+Target producer:
+
+```text
+snapshot scan sr_fact
+  -> filter day_id BETWEEN 8 AND 15
+  -> project dimension_id, event_id, metric_value
+  -> hash exchange on dimension_id
+```
+
+This keeps the same producer grammar while exercising a different partition key and downstream
+Window shape.
+
+### S01 - single-partition Window
 
 Scenario weight: **10%**.
 
 ```sql
-SELECT SUM(metric_value) AS metric_sum
-FROM sr_fact
-WHERE day_id BETWEEN 4 AND 27
+WITH ranked AS (
+  SELECT
+    event_id,
+    ROW_NUMBER() OVER (
+      ORDER BY sequence_id, event_id) AS rn
+  FROM sr_fact
+  WHERE sparse_flag = true
+)
+SELECT MAX(rn) AS sparse_global_rows
+FROM ranked
 ```
 
-Intended target producer:
+Target producer:
 
 ```text
 snapshot scan sr_fact
-  -> filter day_id BETWEEN 4 AND 27
-  -> project metric_value
+  -> filter sparse_flag = true
+  -> project event_id, sequence_id
   -> single-partition exchange
 ```
 
-The final global aggregate is downstream. This row intentionally exercises the allowed
-single-partition producer without relying on sampled range partitioning or a forced `ORDER BY` plan.
+An unpartitioned Window requires single-partition distribution. The sparse predicate keeps the
+single downstream partition bounded while the scan itself still exercises the registered source
+scale. The final aggregate is downstream of the Window and target exchange.
 
-### J01 - downstream sort-merge join consumer
+### J01 - sort-merge join consumer
 
-Scenario weight: **20%**.
+Scenario weight: **25%**.
 
 ```sql
-SELECT
-  f.tenant_id,
-  d.region_id,
-  SUM(f.metric_value) AS metric_sum
+SELECT SUM(f.metric_value + d.segment_id) AS joined_checksum
 FROM sr_fact f
 JOIN sr_dim d
   ON f.dimension_id = d.dimension_id
 WHERE f.day_id BETWEEN 4 AND 27
-GROUP BY f.tenant_id, d.region_id
 ```
 
 The only adoption candidate is the fact-side producer:
@@ -203,85 +232,87 @@ The only adoption candidate is the fact-side producer:
 ```text
 snapshot scan sr_fact
   -> filter day_id BETWEEN 4 AND 27
-  -> project tenant_id, dimension_id, metric_value
+  -> project dimension_id, metric_value
   -> hash exchange on dimension_id
 ```
 
-The dimension scan, its exchange if any, join, and final aggregation are ordinary downstream work.
-The registered 8 GiB dimension snapshot is deliberately well above ordinary broadcast thresholds,
-but the campaign does not disable broadcast or add a join hint. If the default/AQE plan nevertheless
-removes the intended fact-side exchange, the row is `NOT_APPLICABLE`; it is not forced back into the
-cohort.
+The dimension scan and its exchange, the sort-merge join, and final aggregate are ordinary
+downstream work. The registered 8 GiB dimension snapshot is deliberately well above ordinary
+broadcast thresholds, but the campaign does not disable broadcast or add a join hint. If the
+default/AQE plan removes the intended fact-side exchange or does not use the registered sort-merge
+join shape, the row is `NOT_APPLICABLE`; it is not forced back into the cohort.
 
-### D01 - later fresh shuffle consumer
+### J02 - join followed by a later fresh shuffle
 
 Scenario weight: **20%**.
 
 ```sql
-WITH per_key AS (
-  SELECT
-    tenant_id,
-    dimension_id,
-    SUM(metric_value) AS metric_sum
-  FROM sr_fact
-  WHERE day_id BETWEEN 4 AND 27
-  GROUP BY tenant_id, dimension_id
-)
-SELECT dimension_id, SUM(metric_sum) AS dimension_sum
-FROM per_key
-GROUP BY dimension_id
+SELECT d.region_id, SUM(f.metric_value) AS region_sum
+FROM sr_fact f
+JOIN sr_dim d
+  ON f.dimension_id = d.dimension_id
+WHERE f.day_id BETWEEN 4 AND 27
+GROUP BY d.region_id
 ```
 
-Intended target producer:
+The only adoption candidate is again the fact-side producer:
 
 ```text
 snapshot scan sr_fact
   -> filter day_id BETWEEN 4 AND 27
-  -> project tenant_id, dimension_id, metric_value
-  -> hash exchange on tenant_id, dimension_id
+  -> project dimension_id, metric_value
+  -> hash exchange on dimension_id
 ```
 
-The first aggregate and the later shuffle by `dimension_id` are downstream. Only the first exchange
-may be adopted; the later exchange must execute fresh. This row checks that a supported query may
-have additional downstream shuffle work without broadening the one-adoption contract.
+The dimension-side exchange, join, partial aggregation, and later shuffle required for final grouping
+are all fresh downstream work. This row proves that a supported query may contain later shuffle work
+without broadening the one-adoption contract.
 
-### E01 - sparse/empty-block consumer
+### E01 - sparse hash producer and Window
 
 Scenario weight: **10%**.
 
 ```sql
-SELECT tenant_id, SUM(metric_value) AS metric_sum
-FROM sr_fact
-WHERE sparse_flag = true
-GROUP BY tenant_id
+WITH ranked AS (
+  SELECT
+    tenant_id,
+    event_id,
+    ROW_NUMBER() OVER (
+      PARTITION BY tenant_id
+      ORDER BY sequence_id, event_id) AS rn
+  FROM sr_fact
+  WHERE sparse_flag = true
+)
+SELECT MAX(rn) AS max_sparse_tenant_rows
+FROM ranked
 ```
 
-Intended target producer:
+Target producer:
 
 ```text
 snapshot scan sr_fact
   -> filter sparse_flag = true
-  -> project tenant_id, metric_value
+  -> project tenant_id, event_id, sequence_id
   -> hash exchange on tenant_id
 ```
 
 The deterministic selectivity is intended to produce many empty mapper/reducer block combinations.
-The query remains in the corpus even if a particular registered scale produces less sparsity than
-expected; no result-driven replacement query is selected.
+The row remains in the corpus even if a scale produces less sparsity than expected; no result-driven
+replacement query is selected.
 
 ## Producer and downstream scope matrix
 
 | Property | Producer allowed? | Downstream allowed in primary corpus? | Rule |
 | --- | --- | --- | --- |
-| explicit immutable Iceberg snapshot scan | yes | yes | current attempt must resolve and certify the requested snapshot |
+| explicit immutable Iceberg snapshot scan | yes | yes | current attempt resolves and certifies the requested snapshot |
 | deterministic built-in projection | yes | yes | only expressions accepted by the closed identity allowlist |
 | deterministic built-in filter | yes | yes | no runtime filter, subquery, or mutable lookup |
-| hash partitioning | yes | n/a | initial reducer count must remain the default-plan value |
+| hash partitioning | yes | n/a | target exchange initial reducer count remains default-plan value |
 | single partitioning | yes | n/a | S01 only |
-| grouped aggregate | no | yes | appears only after the target exchange |
-| Window | no | yes | W01 only; sort/window are downstream |
-| sort-merge join | no | yes | J01 only; fact target is before the join |
-| later fresh shuffle | no | yes | D01 only; never adopted in the same query |
+| partial or final aggregate | no | yes | never below the target exchange |
+| Window | no | yes | W01, W02, S01, E01 only; sort/window are downstream |
+| sort-merge join | no | yes | J01/J02 only; fact target is before the join |
+| later fresh shuffle | no | yes | J01/J02 and Window result reduction may contain fresh downstream shuffle |
 | broadcast conversion under default AQE | no producer change | conditionally | if it removes the registered target exchange, row is NOT_APPLICABLE |
 | sampled range partitioning | no | no | mechanism-only if separately studied |
 | runtime-filter/DPP-dependent scan | no | no | excluded from v1 |
@@ -293,7 +324,7 @@ expected; no result-driven replacement query is selected.
 
 ## Corpus immutability and admission
 
-Before the first timed value observation, the campaign artifact must contain for every primary
+Before the first timed value observation, the campaign artifact contains for every primary
 `(workload id, scale id)` row:
 
 - SQL text digest matching this file;
@@ -301,7 +332,8 @@ Before the first timed value observation, the campaign artifact must contain for
 - source adapter/version and explicit Iceberg snapshot id;
 - source schema/field ids and ordered mapper decomposition certification;
 - data-file byte total and actual planned input-partition count;
-- physical-plan digest and the exact target exchange ordinal/identity;
+- physical-plan digest and exact target exchange ordinal/identity;
+- proof that the target exchange child is only the certified scan plus allowed filter/project;
 - initial target mapper and reducer counts;
 - AQE enabled state and relevant default configuration snapshot;
 - provider build/version and storage namespace;
