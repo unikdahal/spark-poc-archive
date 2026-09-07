@@ -35,9 +35,9 @@ private[spark] final case class ShuffleRecoveryPreparedMap(
 /**
  * Spark-owned immutable result of the one untrusted recovery boundary.
  *
- * Exact reducer addressing remains in the immutable reference-provider index and is revalidated
- * by the fetch path. The driver retains O(M) prepared map descriptors rather than an O(M x R)
- * block matrix.
+ * Exact reducer addressing remains in the immutable provider representation and is revalidated by
+ * the fetch path. The driver retains O(M) prepared map descriptors and O(R) reducer aggregates,
+ * never an O(M x R) block matrix.
  */
 private[spark] final case class PreparedShuffleRecoveryAdoption(
     reservation: ShuffleRecoveryAdoptionReservation,
@@ -49,7 +49,8 @@ private[spark] final case class PreparedShuffleRecoveryAdoption(
     targetShuffleId: Int,
     mapperCount: Int,
     reducerCount: Int,
-    maps: Vector[ShuffleRecoveryPreparedMap])
+    maps: Vector[ShuffleRecoveryPreparedMap],
+    statistics: ShuffleRecoveryStatistics)
 
 private[shuffle] final case class ShuffleRecoveryValidatedCandidate(
     recoveryGroup: String,
@@ -202,11 +203,32 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
           untrusted.physicalBlockBytes)
         index += 1
       }
+
+      val claimedStatistics = descriptor.statistics
+      if (claimedStatistics == null || claimedStatistics.totalDataSize == null ||
+          claimedStatistics.bytesByReducer == null || claimedStatistics.numOutputRows == null) {
+        return Left("provider claim statistics contain a null presence field")
+      }
+      val reducerStatisticsSnapshot = claimedStatistics.bytesByReducer match {
+        case Some(values) if values == null =>
+          return Left("provider reducer statistics are null")
+        case Some(values) =>
+          metadataBytes = checkedMetadataBytes(
+            metadataBytes,
+            Math.multiplyExact(values.length.toLong, java.lang.Long.BYTES.toLong))
+          Some(values.clone())
+        case None => None
+      }
+      val totalDataSizeSnapshot = claimedStatistics.totalDataSize
+      val numOutputRowsSnapshot = claimedStatistics.numOutputRows
+
+      // Mutable provider arrays are no longer observed after this point.
       observer.afterClaimSnapshot()
 
       val prepared = new Array[ShuffleRecoveryPreparedMap](snapshots.length)
       val seen = mutable.BitSet.empty
       index = 0
+      var physicalDataBytes = 0L
       while (index < snapshots.length) {
         val snapshot = snapshots(index)
         if (snapshot.mapIndex < 0 || snapshot.mapIndex >= candidate.mapperCount ||
@@ -238,6 +260,7 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
         if (!validExactIndexLength(candidate.reducerCount, snapshot.indexLength)) {
           return Left("provider exact block index length is malformed or oversized")
         }
+        physicalDataBytes = Math.addExact(physicalDataBytes, snapshot.physicalBlockBytes)
         prepared(snapshot.mapIndex) = ShuffleRecoveryPreparedMap(
           snapshot.mapIndex,
           snapshot.providerHandle,
@@ -252,6 +275,46 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
       if (seen.size != candidate.mapperCount || prepared.exists(_ == null)) {
         return Left("provider claim does not cover every expected mapper exactly once")
       }
+
+      val reducerStatistics = reducerStatisticsSnapshot.map { values =>
+        if (values.length != candidate.reducerCount) {
+          return Left("provider reducer statistics do not match the current reducer shape")
+        }
+        var total = 0L
+        var reduceId = 0
+        while (reduceId < values.length) {
+          val value = values(reduceId)
+          if (value < 0L) {
+            return Left("provider reducer statistics contain a negative value")
+          }
+          total = Math.addExact(total, value)
+          reduceId += 1
+        }
+        if (total != physicalDataBytes) {
+          return Left("provider reducer statistics do not account for all physical shuffle bytes")
+        }
+        values.toVector
+      }
+      totalDataSizeSnapshot.foreach { total =>
+        if (total < 0L || total != physicalDataBytes) {
+          return Left("provider total shuffle size is inconsistent with map descriptors")
+        }
+        reducerStatistics.foreach { byReducer =>
+          if (byReducer.foldLeft(0L)(Math.addExact) != total) {
+            return Left("provider total shuffle size is inconsistent with reducer statistics")
+          }
+        }
+      }
+      numOutputRowsSnapshot.foreach { rows =>
+        if (rows < 0L) {
+          return Left("provider output row count is negative")
+        }
+      }
+      val statistics = ShuffleRecoveryStatistics(
+        totalDataSizeSnapshot,
+        reducerStatistics,
+        numOutputRowsSnapshot)
+
       Right(PreparedShuffleRecoveryAdoption(
         reservation,
         binding,
@@ -262,7 +325,8 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
         request.target.targetShuffleId,
         candidate.mapperCount,
         candidate.reducerCount,
-        prepared.toVector))
+        prepared.toVector,
+        statistics))
     } catch {
       case NonFatal(_) => Left("provider claim failed bounded validation")
     }
@@ -283,7 +347,7 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
   private def checkedMetadataBytes(current: Long, additional: Long): Long = {
     val updated = Math.addExact(current, additional)
     if (updated > MaxClaimMetadataBytes) {
-      throw new IllegalArgumentException("provider claim metadata exceeds the Phase 0 bound")
+      throw new IllegalArgumentException("provider claim metadata exceeds the bounded claim budget")
     }
     updated
   }
