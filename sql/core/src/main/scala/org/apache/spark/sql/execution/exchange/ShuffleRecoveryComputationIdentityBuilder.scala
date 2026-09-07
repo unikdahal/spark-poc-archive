@@ -21,12 +21,83 @@ import java.util.IdentityHashMap
 
 import scala.collection.mutable
 
-import org.apache.spark.shuffle._
-import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, RangePartitioning}
-import org.apache.spark.sql.catalyst.plans.physical.SinglePartition
-import org.apache.spark.sql.execution.{FilterExec, ProjectExec, RangeExec, SparkPlan}
-import org.apache.spark.sql.types._
+import org.apache.spark.shuffle.{
+  ShuffleRecoveryBooleanValue,
+  ShuffleRecoveryCanonicalValue,
+  ShuffleRecoveryCompatibility,
+  ShuffleRecoveryComputationIdentity,
+  ShuffleRecoveryExpressionKind,
+  ShuffleRecoveryExpressionNode,
+  ShuffleRecoveryHashPartitioning,
+  ShuffleRecoveryIdentityBuilt => _,
+  ShuffleRecoveryInlineOperator,
+  ShuffleRecoveryIntValue,
+  ShuffleRecoveryLongValue,
+  ShuffleRecoveryMapperDecomposition,
+  ShuffleRecoveryOperatorKind,
+  ShuffleRecoveryOperatorNode,
+  ShuffleRecoveryOutputContract,
+  ShuffleRecoveryOutputField,
+  ShuffleRecoveryPartitioning,
+  ShuffleRecoverySinglePartition,
+  ShuffleRecoverySourceToken,
+  ShuffleRecoveryStringValue,
+  ShuffleRecoveryNullValue}
+import org.apache.spark.sql.catalyst.expressions.{
+  Alias,
+  And,
+  Attribute,
+  AttributeReference,
+  BinaryExpression,
+  BoundReference,
+  EqualNullSafe,
+  EqualTo,
+  ExprId,
+  Expression,
+  GreaterThan,
+  GreaterThanOrEqual,
+  IsNotNull,
+  IsNull,
+  LessThan,
+  LessThanOrEqual,
+  Literal,
+  Murmur3Hash,
+  Nondeterministic,
+  Not,
+  Or,
+  Pmod}
+import org.apache.spark.sql.catalyst.plans.physical.{
+  HashPartitioning,
+  Partitioning,
+  RangePartitioning,
+  SinglePartition}
+import org.apache.spark.sql.execution.{
+  FilterExec,
+  InputAdapter,
+  ProjectExec,
+  RangeExec,
+  SparkPlan,
+  WholeStageCodegenExec}
+import org.apache.spark.sql.types.{
+  BinaryType,
+  BooleanType,
+  ByteType,
+  DataType,
+  DateType,
+  Decimal,
+  DecimalType,
+  DoubleType,
+  FixedLength,
+  FloatType,
+  IntegerType,
+  LongType,
+  MaxLength,
+  Metadata,
+  NoConstraint,
+  ShortType,
+  StringType,
+  TimestampNTZType,
+  TimestampType}
 import org.apache.spark.unsafe.types.UTF8String
 
 private[sql] sealed trait ShuffleRecoveryIdentityBuildResult
@@ -35,38 +106,26 @@ private[sql] final case class ShuffleRecoveryIdentityBuilt(
 private[sql] final case class ShuffleRecoveryIdentityRejected(
     reason: ShuffleRecoveryMissReason) extends ShuffleRecoveryIdentityBuildResult
 
-/**
- * Semantic configuration resolved before computation-identity construction.
- *
- * These fields are mandatory rather than user-selectable identity options. Over-including a
- * semantic setting can cause a safe cache miss; allowing callers to omit a required setting could
- * cause a false match.
- */
+/** Semantic SQL configuration resolved before computation-identity construction. */
 private[sql] final case class ShuffleRecoveryIdentitySemanticConfig(
     ansiEnabled: Boolean,
     sessionTimeZone: String)
 
 /**
- * Already resolved, immutable facts consumed at the shuffle materialization boundary.
+ * Immutable facts consumed at the shuffle materialization boundary.
  *
- * Source-token interpretation belongs to the source-read identity boundary. This type only owns
- * exact ordered inclusion of those opaque tokens and the mapper-decomposition descriptors. Plan
- * object identity is used solely as an in-process lookup key and is never encoded.
+ * Source-specific interpretation is deliberately absent. A source-read implementation supplies an
+ * opaque, versioned token and an exact mapper-decomposition descriptor. Plan object identity is
+ * used only for this in-process lookup and is never encoded into the computation identity.
  */
 private[sql] final class ShuffleRecoveryResolvedIdentityInputs private (
     private val sourceTokens: IdentityHashMap[SparkPlan, ShuffleRecoverySourceToken],
     val mapperDecomposition: ShuffleRecoveryMapperDecomposition,
     val resolvedValues: Map[String, ShuffleRecoveryCanonicalValue],
-    val semanticConfig: ShuffleRecoveryIdentitySemanticConfig,
-    private val parentIdentities:
-      IdentityHashMap[ShuffleExchangeExec, ShuffleRecoveryComputationIdentity]) {
+    val semanticConfig: ShuffleRecoveryIdentitySemanticConfig) {
 
   private[exchange] def sourceTokenFor(plan: SparkPlan): Option[ShuffleRecoverySourceToken] =
     Option(sourceTokens.get(plan))
-
-  private[exchange] def parentIdentityFor(
-      exchange: ShuffleExchangeExec): Option[ShuffleRecoveryComputationIdentity] =
-    Option(parentIdentities.get(exchange))
 }
 
 private[sql] object ShuffleRecoveryResolvedIdentityInputs {
@@ -74,54 +133,47 @@ private[sql] object ShuffleRecoveryResolvedIdentityInputs {
       sourceTokens: Seq[(SparkPlan, ShuffleRecoverySourceToken)],
       mapperDecomposition: ShuffleRecoveryMapperDecomposition,
       resolvedValues: Map[String, ShuffleRecoveryCanonicalValue],
-      semanticConfig: ShuffleRecoveryIdentitySemanticConfig,
-      parentIdentities: Seq[(ShuffleExchangeExec, ShuffleRecoveryComputationIdentity)] = Nil)
+      semanticConfig: ShuffleRecoveryIdentitySemanticConfig)
       : ShuffleRecoveryResolvedIdentityInputs = {
+    require(sourceTokens != null, "source token bindings must not be null")
     require(mapperDecomposition != null, "mapper decomposition must not be null")
     require(resolvedValues != null, "resolved values must not be null")
     require(semanticConfig != null, "semantic configuration must not be null")
     require(semanticConfig.sessionTimeZone != null && semanticConfig.sessionTimeZone.nonEmpty,
       "session time zone must not be empty")
 
-    val sources = new IdentityHashMap[SparkPlan, ShuffleRecoverySourceToken]()
+    val bindings = new IdentityHashMap[SparkPlan, ShuffleRecoverySourceToken]()
     sourceTokens.foreach { case (plan, token) =>
       require(plan != null && token != null, "source token binding must not contain null")
-      require(sources.put(plan, token) == null, "duplicate source plan token binding")
-    }
-    val parents =
-      new IdentityHashMap[ShuffleExchangeExec, ShuffleRecoveryComputationIdentity]()
-    parentIdentities.foreach { case (exchange, identity) =>
-      require(exchange != null && identity != null,
-        "parent identity binding must not contain null")
-      require(parents.put(exchange, identity) == null,
-        "duplicate parent exchange identity binding")
+      require(bindings.put(plan, token) == null, "duplicate source plan token binding")
     }
     new ShuffleRecoveryResolvedIdentityInputs(
-      sources,
+      bindings,
       mapperDecomposition,
       resolvedValues,
-      semanticConfig,
-      parents)
+      semanticConfig)
   }
 }
 
 /**
- * Closed Phase 1 policy shared by identity construction and eligibility classification.
+ * Authoritative Phase 1 semantic policy for the currently supported identity slice.
  *
- * The existing opportunity rule set remains the authoritative class allowlist. This policy adds
- * the stricter semantic requirement needed for a positive computation identity: every admitted
- * class must also have an explicit canonical encoder below. A class that is observable by the
- * opportunity study but lacks such an encoder is still a recovery miss.
+ * The opportunity analyzer's exact class allowlist remains the outer observational gate. A class
+ * must additionally have a reviewed canonical encoder here before it can receive a positive reuse
+ * identity. Unknown, extension, nondeterministic, Python/Arrow, and otherwise unmodeled semantics
+ * fail closed with the same stable miss-reason vocabulary used by eligibility reporting.
  */
 private[sql] object ShuffleRecoveryComputationIdentityPolicy {
   import ShuffleRecoveryMissReason._
 
-  private val supportedPlanClasses = Set(
+  private val supportedPlanClassNames = Set(
     classOf[ProjectExec].getName,
     classOf[FilterExec].getName,
-    classOf[RangeExec].getName)
+    classOf[RangeExec].getName,
+    classOf[WholeStageCodegenExec].getName,
+    classOf[InputAdapter].getName)
 
-  private val supportedExpressionClasses = Set(
+  private val supportedExpressionClassNames = Set(
     classOf[Alias].getName,
     classOf[AttributeReference].getName,
     classOf[BoundReference].getName,
@@ -146,7 +198,7 @@ private[sql] object ShuffleRecoveryComputationIdentityPolicy {
     val className = plan.getClass.getName
     if (!rules.allowedOperatorClassNames.contains(className)) {
       Some(CustomOperator)
-    } else if (!supportedPlanClasses.contains(className)) {
+    } else if (!supportedPlanClassNames.contains(className)) {
       Some(UnsupportedOperator)
     } else {
       None
@@ -162,9 +214,8 @@ private[sql] object ShuffleRecoveryComputationIdentityPolicy {
     } else if (ShuffleRecoveryOpportunityAnalyzer
         .isPythonOrArrowExpressionClassName(className)) {
       Some(PythonOrArrowPresent)
-    } else if (!rules.allowedExpressionClassNames.contains(className)) {
-      Some(UnsupportedExpression)
-    } else if (!supportedExpressionClasses.contains(className)) {
+    } else if (!rules.allowedExpressionClassNames.contains(className) ||
+        !supportedExpressionClassNames.contains(className)) {
       Some(UnsupportedExpression)
     } else {
       None
@@ -173,17 +224,14 @@ private[sql] object ShuffleRecoveryComputationIdentityPolicy {
 }
 
 /**
- * Builds a versioned computation identity from resolved Spark SQL shuffle semantics.
+ * Builds a versioned identity only after materialization-boundary facts are resolved.
  *
- * It deliberately supports a small closed operator/expression slice. No canonicalized-plan text,
- * reflection, `toString`, scheduler ids, object ids, executor ids, or query execution ids enter the
- * payload. Range partitioning, aggregates, Python/Arrow, custom nodes, and unknown semantics fail
- * closed.
+ * No canonicalized-plan text, `toString`, reflection fallback, scheduler id, shuffle id, stage id,
+ * task-attempt id, executor id, query execution id, or object identity is encoded. Range
+ * partitioning, aggregates, Python/Arrow, custom nodes, and unknown semantics fail closed.
  */
 private[sql] object ShuffleRecoveryComputationIdentityBuilder {
-  import ShuffleRecoveryExpressionKind._
   import ShuffleRecoveryMissReason._
-  import ShuffleRecoveryOperatorKind._
 
   private val MaxPlanDepth = 64
   private val MaxPlanNodes = 4096
@@ -200,9 +248,6 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
       val rules: ShuffleRecoveryEligibilityRules) {
     val activePlans = new IdentityHashMap[SparkPlan, java.lang.Boolean]()
     val sourceTokens = mutable.ArrayBuffer.empty[ShuffleRecoverySourceToken]
-    val parentIdentities = mutable.ArrayBuffer.empty[ShuffleRecoveryComputationIdentity]
-    val parentOrdinals =
-      new IdentityHashMap[ShuffleExchangeExec, java.lang.Integer]()
     var planNodes: Int = 0
   }
 
@@ -224,7 +269,7 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
     try {
       val context = new BuildContext(inputs, rules)
       val outputContract = buildOutputContract(exchange.child.output)
-      val producer = buildOperator(exchange.child, context, 0)
+      val producer = buildOperator(exchange.child, context, depth = 0)
       val partitioning = buildPartitioning(
         exchange.outputPartitioning,
         exchange.child.output,
@@ -244,8 +289,7 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
         context.sourceTokens.toVector,
         inputs.resolvedValues,
         semanticConfig,
-        compatibility,
-        context.parentIdentities.toVector)
+        compatibility)
       ShuffleRecoveryIdentityBuilt(identity)
     } catch {
       case BuildFailure(reason) => ShuffleRecoveryIdentityRejected(reason)
@@ -256,15 +300,14 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
 
   private def buildOutputContract(output: Seq[Attribute]): ShuffleRecoveryOutputContract = {
     val fields = output.map { attribute =>
-      val dataType = canonicalDataType(attribute.dataType)
-      // Metadata is deliberately over-included when present. This is conservative: metadata that
-      // does not affect bytes may cause a miss, but no metadata mutation can silently reuse bytes.
-      val metadata = if (attribute.metadata == Metadata.empty) {
-        Map.empty[String, String]
-      } else {
-        Map("spark-metadata-json" -> attribute.metadata.json)
+      if (attribute.metadata != Metadata.empty) {
+        // Metadata is outside this initial slice until each supported key has an explicit canonical
+        // encoding. A JSON/map serialization fallback would make field ordering an identity input.
+        fail(DeterminismUnproven)
       }
-      ShuffleRecoveryOutputField.create(dataType, attribute.nullable, metadata)
+      ShuffleRecoveryOutputField.create(
+        canonicalDataType(attribute.dataType),
+        attribute.nullable)
     }.toVector
     ShuffleRecoveryOutputContract(
       fields,
@@ -290,13 +333,19 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
     try {
       ShuffleRecoveryComputationIdentityPolicy.planMissReason(plan, context.rules).foreach(fail)
       plan match {
+        case wrapper: WholeStageCodegenExec =>
+          buildOperator(wrapper.child, context, depth + 1)
+
+        case wrapper: InputAdapter =>
+          buildOperator(wrapper.child, context, depth + 1)
+
         case project: ProjectExec =>
           val ordinals = inputOrdinals(project.child.output)
           val expressions = project.projectList.map { expression =>
             buildExpression(expression, ordinals, context, depth + 1)
           }.toVector
           ShuffleRecoveryOperatorNode(
-            Project,
+            ShuffleRecoveryOperatorKind.Project,
             Vector.empty,
             expressions,
             Vector(ShuffleRecoveryInlineOperator(
@@ -306,7 +355,7 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
           val ordinals = inputOrdinals(filter.child.output)
           val condition = buildExpression(filter.condition, ordinals, context, depth + 1)
           ShuffleRecoveryOperatorNode(
-            Filter,
+            ShuffleRecoveryOperatorKind.Filter,
             Vector.empty,
             Vector(condition),
             Vector(ShuffleRecoveryInlineOperator(
@@ -318,7 +367,7 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
           }
           context.sourceTokens += token
           ShuffleRecoveryOperatorNode(
-            RangeSource,
+            ShuffleRecoveryOperatorKind.RangeSource,
             Vector(
               ShuffleRecoveryLongValue(range.start),
               ShuffleRecoveryLongValue(range.end),
@@ -335,7 +384,7 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
   }
 
   private def buildPartitioning(
-      partitioning: org.apache.spark.sql.catalyst.plans.physical.Partitioning,
+      partitioning: Partitioning,
       input: Seq[Attribute],
       context: BuildContext): ShuffleRecoveryPartitioning = partitioning match {
     case HashPartitioning(expressions, count) =>
@@ -347,7 +396,7 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
         if (!isHashStableType(expression.dataType)) {
           fail(UnsupportedExpression)
         }
-        buildExpression(expression, ordinals, context, 0)
+        buildExpression(expression, ordinals, context, depth = 0)
       }.toVector
       ShuffleRecoveryHashPartitioning(
         count,
@@ -375,7 +424,7 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
     expression match {
       case literal: Literal =>
         ShuffleRecoveryExpressionNode(
-          Literal,
+          ShuffleRecoveryExpressionKind.Literal,
           dataType,
           literal.nullable,
           Vector(canonicalLiteral(literal)),
@@ -384,7 +433,7 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
       case attribute: AttributeReference =>
         val ordinal = inputOrdinals.getOrElse(attribute.exprId, fail(DeterminismUnproven))
         ShuffleRecoveryExpressionNode(
-          Input,
+          ShuffleRecoveryExpressionKind.Input,
           dataType,
           attribute.nullable,
           Vector(ShuffleRecoveryIntValue(ordinal)),
@@ -395,7 +444,7 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
           fail(DeterminismUnproven)
         }
         ShuffleRecoveryExpressionNode(
-          Input,
+          ShuffleRecoveryExpressionKind.Input,
           dataType,
           bound.nullable,
           Vector(ShuffleRecoveryIntValue(bound.ordinal)),
@@ -404,38 +453,70 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
       case alias: Alias =>
         // Alias names and ExprIds are routing metadata; the value-producing child is semantic.
         ShuffleRecoveryExpressionNode(
-          Alias,
+          ShuffleRecoveryExpressionKind.Alias,
           dataType,
           alias.nullable,
           Vector.empty,
           Vector(buildExpression(alias.child, inputOrdinals, context, depth + 1)))
 
-      case value: EqualTo => binary(EqualTo, value, inputOrdinals, context, depth)
-      case value: EqualNullSafe =>
-        binary(EqualNullSafe, value, inputOrdinals, context, depth)
-      case value: GreaterThan => binary(GreaterThan, value, inputOrdinals, context, depth)
-      case value: GreaterThanOrEqual =>
-        binary(GreaterThanOrEqual, value, inputOrdinals, context, depth)
-      case value: LessThan => binary(LessThan, value, inputOrdinals, context, depth)
-      case value: LessThanOrEqual =>
-        binary(LessThanOrEqual, value, inputOrdinals, context, depth)
-      case value: And => binary(And, value, inputOrdinals, context, depth)
-      case value: Or => binary(Or, value, inputOrdinals, context, depth)
-      case value: Pmod => binary(Pmod, value, inputOrdinals, context, depth)
+      case value: EqualTo => binary(
+        ShuffleRecoveryExpressionKind.EqualTo, value, inputOrdinals, context, depth)
+      case value: EqualNullSafe => binary(
+        ShuffleRecoveryExpressionKind.EqualNullSafe, value, inputOrdinals, context, depth)
+      case value: GreaterThan => binary(
+        ShuffleRecoveryExpressionKind.GreaterThan, value, inputOrdinals, context, depth)
+      case value: GreaterThanOrEqual => binary(
+        ShuffleRecoveryExpressionKind.GreaterThanOrEqual,
+        value,
+        inputOrdinals,
+        context,
+        depth)
+      case value: LessThan => binary(
+        ShuffleRecoveryExpressionKind.LessThan, value, inputOrdinals, context, depth)
+      case value: LessThanOrEqual => binary(
+        ShuffleRecoveryExpressionKind.LessThanOrEqual,
+        value,
+        inputOrdinals,
+        context,
+        depth)
+      case value: And => binary(
+        ShuffleRecoveryExpressionKind.And, value, inputOrdinals, context, depth)
+      case value: Or => binary(
+        ShuffleRecoveryExpressionKind.Or, value, inputOrdinals, context, depth)
+      case value: Pmod => binary(
+        ShuffleRecoveryExpressionKind.Pmod, value, inputOrdinals, context, depth)
 
-      case value: Not => unary(Not, value.child, value, inputOrdinals, context, depth)
-      case value: IsNull =>
-        unary(IsNull, value.child, value, inputOrdinals, context, depth)
-      case value: IsNotNull =>
-        unary(IsNotNull, value.child, value, inputOrdinals, context, depth)
+      case value: Not => unary(
+        ShuffleRecoveryExpressionKind.Not,
+        value.child,
+        value,
+        inputOrdinals,
+        context,
+        depth)
+      case value: IsNull => unary(
+        ShuffleRecoveryExpressionKind.IsNull,
+        value.child,
+        value,
+        inputOrdinals,
+        context,
+        depth)
+      case value: IsNotNull => unary(
+        ShuffleRecoveryExpressionKind.IsNotNull,
+        value.child,
+        value,
+        inputOrdinals,
+        context,
+        depth)
 
       case hash: Murmur3Hash =>
         ShuffleRecoveryExpressionNode(
-          Murmur3Hash,
+          ShuffleRecoveryExpressionKind.Murmur3Hash,
           dataType,
           hash.nullable,
           Vector(ShuffleRecoveryIntValue(hash.seed)),
-          hash.children.map(buildExpression(_, inputOrdinals, context, depth + 1)).toVector)
+          hash.children.map { child =>
+            buildExpression(child, inputOrdinals, context, depth + 1)
+          }.toVector)
 
       case _ => fail(UnsupportedExpression)
     }
@@ -528,7 +609,7 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
     case FloatType | DoubleType | DateType | TimestampType | TimestampNTZType => true
     case BinaryType | _: DecimalType => true
     // String hashing has additional collation/runtime compatibility switches. It stays excluded
-    // until those switches are modeled by the supported slice rather than guessed here.
+    // until those switches are explicitly modeled instead of inferred from a type name.
     case _ => false
   }
 
