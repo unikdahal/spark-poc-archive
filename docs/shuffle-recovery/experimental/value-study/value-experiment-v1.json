@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "specId": "shuffle-recovery-value-experiment-v1",
+  "workloadScopeDocument": "workload-scope-v1.md",
   "lineage": {
     "upstreamBaseline": "2a7cfea06ba135cf0ddc62902eb0daf5a835c672",
     "experimentalBase": "5f773c4669d06af57216b09748ec7d168412ad3c",
@@ -11,11 +12,12 @@
     "realTraceWeights": false,
     "historicalPilotActionsRun": 33963836467,
     "historicalPilotArtifactId": 9969032965,
-    "historicalPilotArtifactSha256": "15bb5b3c2ebfbfa565c95163c9a2644cd9a147971f39c62d23583a84f6090013"
+    "historicalPilotArtifactSha256": "15bb5b3c2ebfbfa565c95163c9a2644cd9a147971f39c62d23583a84f6090013",
+    "historicalPilotUse": "stage-relative failure-point selection only; no historical performance result contributes to the v1 effect estimate, weights, confidence interval, or economics"
   },
   "targetDeployment": {
     "orchestrator": "Kubernetes batch application relaunch",
-    "source": "Apache Iceberg table pinned to explicit snapshot id",
+    "source": "Apache Iceberg tables pinned to explicit snapshot ids",
     "shuffleProvider": "Apache Celeborn real durable remote-shuffle candidate",
     "driver": {
       "vCpu": 4,
@@ -27,8 +29,10 @@
       "memoryGiBEach": 32
     },
     "networkGbpsPerWorker": 10,
-    "factSnapshotGiB": 256,
+    "factInputScaleGiB": [16, 64, 256, 512],
+    "nominalFactInputGiB": 256,
     "dimensionSnapshotGiB": 8,
+    "inputSizeToleranceFraction": 0.02,
     "artifactRetentionHours": 2,
     "conditionalDriverFailureRate": 0.01
   },
@@ -55,7 +59,8 @@
       "incremental external result delivery",
       "partial-map reuse",
       "unsupported expressions",
-      "runtime-dependent scans"
+      "runtime-dependent scans",
+      "sampled range partitioning"
     ]
   },
   "cohort": [
@@ -72,12 +77,12 @@
     {
       "id": "S01",
       "weight": 0.10,
-      "shape": "scan/filter/project -> single-partition exchange -> global ordered consumer"
+      "shape": "scan/filter/project -> single-partition exchange -> global aggregate"
     },
     {
       "id": "J01",
       "weight": 0.20,
-      "shape": "fact scan/filter/project -> hash exchange -> downstream sort-merge join with current dimension scan"
+      "shape": "fact scan/filter/project -> hash exchange -> downstream sort-merge join and aggregate"
     },
     {
       "id": "D01",
@@ -87,7 +92,7 @@
     {
       "id": "E01",
       "weight": 0.10,
-      "shape": "high-selectivity scan/filter/project -> hash exchange -> grouped aggregate, including sparse/zero-block outputs"
+      "shape": "selective scan/filter/project -> hash exchange -> grouped aggregate, stressing empty blocks"
     }
   ],
   "failurePoints": [
@@ -116,24 +121,46 @@
       "rule": "immediately before the final material downstream stage is launched"
     }
   ],
-  "primaryShapes": [
+  "primaryInputScales": [
     {
-      "maps": 128,
-      "reducers": 1
+      "id": "I16",
+      "factGiB": 16,
+      "mapperMin": 96,
+      "mapperMax": 160,
+      "hashReducers": 200,
+      "singleReducers": 1
     },
     {
-      "maps": 512,
-      "reducers": 64
+      "id": "I64",
+      "factGiB": 64,
+      "mapperMin": 384,
+      "mapperMax": 640,
+      "hashReducers": 200,
+      "singleReducers": 1
     },
     {
-      "maps": 2048,
-      "reducers": 256
+      "id": "I256",
+      "factGiB": 256,
+      "mapperMin": 1536,
+      "mapperMax": 2560,
+      "hashReducers": 200,
+      "singleReducers": 1
     },
     {
-      "maps": 4096,
-      "reducers": 512
+      "id": "I512",
+      "factGiB": 512,
+      "mapperMin": 3072,
+      "mapperMax": 5120,
+      "hashReducers": 200,
+      "singleReducers": 1
     }
   ],
+  "primaryPlanPolicy": {
+    "aqe": "tested Spark default; do not override in primary campaign",
+    "shufflePartitions": "tested Spark default of 200; do not override in primary campaign",
+    "broadcastThresholds": "tested Spark defaults; do not override in primary campaign",
+    "forcedPlanSettings": "mechanism-only and excluded from primary aggregate gates"
+  },
   "mechanismOnlyShapes": [
     {
       "maps": 8192,
@@ -155,14 +182,14 @@
     "metadataPageBytes": 1048576,
     "metadataPages": 256,
     "concurrentProviderReads": 128,
-    "artifactBytes": 274877906944,
-    "artifactGiBHours": 512
+    "artifactBytes": 549755813888,
+    "artifactGiBHours": 1024
   },
   "trialPolicy": {
     "pairedRepetitionsPerCell": 12,
+    "cellDimensions": ["cohort id", "input scale", "failure point"],
     "randomizationSeed": 557003,
     "hardTimeoutSeconds": 1800,
-    "aqe": "Spark default enabled in primary campaign",
     "outlierDeletion": "none",
     "cacheWarmth": "natural backend warmth; no manual cache flush in primary campaign",
     "misses": "included in recovery arm",
@@ -176,7 +203,8 @@
     "aggregateMetric": "1 - weighted_sum(recovery failure-to-correct-result ms) / weighted_sum(control failure-to-correct-result ms)",
     "confidence": "paired stratified cluster bootstrap by workload id with 10000 resamples",
     "confidenceLevel": 0.95,
-    "bootstrapSeed": 55003
+    "bootstrapSeed": 55003,
+    "inputScaleAggregation": "report scales individually and use equal-scale aggregate; never infer scale weights from observed performance"
   },
   "gates": {
     "restartImprovementPointEstimateMin": 0.20,
