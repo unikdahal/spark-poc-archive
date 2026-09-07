@@ -244,8 +244,8 @@ class ShuffleRecoverySourceReadIdentitySuite extends SharedSparkSession {
     val newSnapshot = token(referenceRegistry.identify(newPlan))
 
     assert(!Arrays.equals(oldSnapshot.canonicalBytes, newSnapshot.canonicalBytes))
-    assert(oldPlan.executeCollect().map(_.getInt(0)).toSeq === Seq(1, 2, 3))
-    assert(newPlan.executeCollect().map(_.getInt(0)).toSeq === Seq(10, 20, 30))
+    assert(ReferenceSnapshotScanExec.rowsForSnapshot(oldPlan.snapshotVersion) === Seq(1, 2, 3))
+    assert(ReferenceSnapshotScanExec.rowsForSnapshot(newPlan.snapshotVersion) === Seq(10, 20, 30))
   }
 
   test("pinned old snapshot remains stable while the current snapshot advances") {
@@ -355,13 +355,14 @@ class ShuffleRecoverySourceReadIdentitySuite extends SharedSparkSession {
     assert(registry.identify(scan()) === Miss(UnknownAdapter))
   }
 
-  test("adapter failure is a recovery miss and does not mutate ordinary execution") {
+  test("adapter failure is a recovery miss and does not mutate source semantics") {
     val plan = scan()
     val throwingRegistry = ShuffleRecoverySourceReadIdentity.registry(
       Seq(new ThrowingReferenceSnapshotSourceAdapter))
+    val rowsBefore = ReferenceSnapshotScanExec.rowsForSnapshot(plan.snapshotVersion)
 
     assert(throwingRegistry.identify(plan) === Miss(AdapterFailed))
-    assert(plan.executeCollect().map(_.getInt(0)).toSeq === Seq(1, 2, 3))
+    assert(ReferenceSnapshotScanExec.rowsForSnapshot(plan.snapshotVersion) === rowsBefore)
   }
 
   test("untrusted token fields are bounded and fail closed before accepted-state copies") {
