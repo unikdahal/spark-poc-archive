@@ -158,7 +158,7 @@ if [[ "${compile}" == success ]]; then
       done
     fi
     report="$(bash .github/scripts/shuffle-recovery-ci-evidence.sh \
-      require-report "${source_root}" "${suite}" "${test_start}" \
+      locate-report "${source_root}" "${suite}" "${test_start}" \
       2>>"${EVIDENCE_DIR}/missing-reports.log")" || {
         report_status=1
         continue
