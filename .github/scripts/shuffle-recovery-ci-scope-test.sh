@@ -185,24 +185,148 @@ fi
 
 fixture="$(mktemp -d)"
 trap 'rm -rf "${fixture}"' EXIT
-mkdir -p "${fixture}/core/src/test/scala/org/apache/spark/shuffle" \
-  "${fixture}/core/target/test-reports"
-touch "${fixture}/core/src/test/scala/org/apache/spark/shuffle/PresentSuite.scala"
-printf '<testsuite tests="1" failures="0"/>\n' > \
-  "${fixture}/core/target/test-reports/TEST-org.apache.spark.shuffle.PresentSuite.xml"
+valid_root="${fixture}/valid"
+mkdir -p "${valid_root}/core/src/test/scala/org/apache/spark/shuffle" \
+  "${valid_root}/core/target/test-reports"
+touch "${valid_root}/core/src/test/scala/org/apache/spark/shuffle/PresentSuite.scala"
+cat > "${valid_root}/core/target/test-reports/TEST-org.apache.spark.shuffle.PresentSuite.xml" <<'XML'
+<testsuite name="org.apache.spark.shuffle.PresentSuite" tests="1" errors="0" failures="0" skipped="0">
+  <testcase classname="org.apache.spark.shuffle.PresentSuite" name="executes"/>
+</testsuite>
+XML
+fresh_marker="${valid_root}/fresh.marker"
+touch -d '2000-01-01 UTC' "${fresh_marker}"
 (
-  cd "${fixture}"
+  cd "${valid_root}"
   bash "${evidence}" require-suite core org.apache.spark.shuffle.PresentSuite >/dev/null
-  bash "${evidence}" require-report core org.apache.spark.shuffle.PresentSuite >/dev/null
+  bash "${evidence}" require-report core org.apache.spark.shuffle.PresentSuite "${fresh_marker}" >/dev/null
   if bash "${evidence}" require-suite core org.apache.spark.shuffle.MissingSuite >/dev/null 2>&1; then
     echo "missing suite unexpectedly succeeded" >&2
     exit 1
   fi
-  if bash "${evidence}" require-report core org.apache.spark.shuffle.MissingSuite >/dev/null 2>&1; then
+  if bash "${evidence}" require-report core org.apache.spark.shuffle.MissingSuite "${fresh_marker}" >/dev/null 2>&1; then
     echo "missing test report unexpectedly succeeded" >&2
     exit 1
   fi
 )
+
+skip_report="${fixture}/map-output-tracker.xml"
+cat > "${skip_report}" <<'XML'
+<testsuite name="org.apache.spark.MapOutputTrackerSuite" tests="2" errors="0" failures="0" skipped="1">
+  <testcase classname="org.apache.spark.MapOutputTrackerSuite" name="executes"/>
+  <testcase classname="org.apache.spark.MapOutputTrackerSuite" name="SPARK-32210: serialize and deserialize over 2GB compressed mapStatuses"><skipped/></testcase>
+</testsuite>
+XML
+bash "${evidence}" validate-report "${skip_report}" org.apache.spark.MapOutputTrackerSuite >/dev/null
+
+wrong_known_skip="${fixture}/wrong-known-skip.xml"
+cat > "${wrong_known_skip}" <<'XML'
+<testsuite name="org.apache.spark.MapOutputTrackerSuite" tests="2" errors="0" failures="0" skipped="1">
+  <testcase classname="org.apache.spark.MapOutputTrackerSuite" name="executes"/>
+  <testcase classname="org.apache.spark.MapOutputTrackerSuite" name="different ignored case"><skipped/></testcase>
+</testsuite>
+XML
+if bash "${evidence}" validate-report "${wrong_known_skip}" org.apache.spark.MapOutputTrackerSuite >/dev/null 2>&1; then
+  echo "different MapOutputTracker ignored case unexpectedly succeeded" >&2
+  exit 1
+fi
+
+unexpected_skip="${fixture}/unexpected-skip.xml"
+cat > "${unexpected_skip}" <<'XML'
+<testsuite name="org.apache.spark.shuffle.PresentSuite" tests="2" errors="0" failures="0" skipped="1">
+  <testcase classname="org.apache.spark.shuffle.PresentSuite" name="executes"/>
+  <testcase classname="org.apache.spark.shuffle.PresentSuite" name="ignored"><skipped/></testcase>
+</testsuite>
+XML
+if bash "${evidence}" validate-report "${unexpected_skip}" org.apache.spark.shuffle.PresentSuite >/dev/null 2>&1; then
+  echo "unapproved skipped test unexpectedly succeeded" >&2
+  exit 1
+fi
+
+wrong_name="${fixture}/wrong-name.xml"
+cat > "${wrong_name}" <<'XML'
+<testsuite name="org.apache.spark.shuffle.OtherSuite" tests="1" errors="0" failures="0" skipped="0">
+  <testcase classname="org.apache.spark.shuffle.OtherSuite" name="executes"/>
+</testsuite>
+XML
+if bash "${evidence}" validate-report "${wrong_name}" org.apache.spark.shuffle.PresentSuite >/dev/null 2>&1; then
+  echo "wrong report suite identity unexpectedly succeeded" >&2
+  exit 1
+fi
+
+wrong_class="${fixture}/wrong-class.xml"
+cat > "${wrong_class}" <<'XML'
+<testsuite name="org.apache.spark.shuffle.PresentSuite" tests="1" errors="0" failures="0" skipped="0">
+  <testcase classname="org.apache.spark.shuffle.OtherSuite" name="executes"/>
+</testsuite>
+XML
+if bash "${evidence}" validate-report "${wrong_class}" org.apache.spark.shuffle.PresentSuite >/dev/null 2>&1; then
+  echo "wrong testcase classname unexpectedly succeeded" >&2
+  exit 1
+fi
+
+empty_xml="${fixture}/empty.xml"
+: > "${empty_xml}"
+if bash "${evidence}" validate-report "${empty_xml}" org.apache.spark.shuffle.PresentSuite >/dev/null 2>&1; then
+  echo "empty XML unexpectedly succeeded" >&2
+  exit 1
+fi
+
+zero_report="${fixture}/zero.xml"
+printf '%s\n' '<testsuite name="org.apache.spark.shuffle.PresentSuite" tests="0" errors="0" failures="0" skipped="0"/>' > "${zero_report}"
+if bash "${evidence}" validate-report "${zero_report}" org.apache.spark.shuffle.PresentSuite >/dev/null 2>&1; then
+  echo "zero-execution report unexpectedly succeeded" >&2
+  exit 1
+fi
+
+all_skipped="${fixture}/all-skipped.xml"
+cat > "${all_skipped}" <<'XML'
+<testsuite name="org.apache.spark.MapOutputTrackerSuite" tests="1" errors="0" failures="0" skipped="1">
+  <testcase classname="org.apache.spark.MapOutputTrackerSuite" name="SPARK-32210: serialize and deserialize over 2GB compressed mapStatuses"><skipped/></testcase>
+</testsuite>
+XML
+if bash "${evidence}" validate-report "${all_skipped}" org.apache.spark.MapOutputTrackerSuite >/dev/null 2>&1; then
+  echo "all-skipped report unexpectedly succeeded" >&2
+  exit 1
+fi
+
+invalid_xml="${fixture}/invalid.xml"
+printf '%s\n' '<testsuite' > "${invalid_xml}"
+if bash "${evidence}" validate-report "${invalid_xml}" org.apache.spark.shuffle.PresentSuite >/dev/null 2>&1; then
+  echo "invalid XML unexpectedly succeeded" >&2
+  exit 1
+fi
+
+stale_root="${fixture}/stale"
+mkdir -p "${stale_root}/core/target/test-reports"
+cp "${valid_root}/core/target/test-reports/TEST-org.apache.spark.shuffle.PresentSuite.xml" \
+  "${stale_root}/core/target/test-reports/TEST-org.apache.spark.shuffle.PresentSuite.xml"
+touch -d '2000-01-01 UTC' "${stale_root}/core/target/test-reports/TEST-org.apache.spark.shuffle.PresentSuite.xml"
+touch "${stale_root}/marker"
+if bash "${evidence}" require-report "${stale_root}/core" \
+    org.apache.spark.shuffle.PresentSuite "${stale_root}/marker" >/dev/null 2>&1; then
+  echo "stale test report unexpectedly succeeded" >&2
+  exit 1
+fi
+
+ambiguous_root="${fixture}/ambiguous/core"
+mkdir -p "${ambiguous_root}/one/test-reports" "${ambiguous_root}/two/test-reports"
+cp "${valid_root}/core/target/test-reports/TEST-org.apache.spark.shuffle.PresentSuite.xml" \
+  "${ambiguous_root}/one/test-reports/TEST-org.apache.spark.shuffle.PresentSuite.xml"
+cp "${valid_root}/core/target/test-reports/TEST-org.apache.spark.shuffle.PresentSuite.xml" \
+  "${ambiguous_root}/two/test-reports/TEST-org.apache.spark.shuffle.PresentSuite.xml"
+if bash "${evidence}" locate-report "${ambiguous_root}" \
+    org.apache.spark.shuffle.PresentSuite >/dev/null 2>&1; then
+  echo "ambiguous exact reports unexpectedly succeeded" >&2
+  exit 1
+fi
+
+missing_cold="${fixture}/missing-cold"
+mkdir -p "${missing_cold}/run-partial" "${missing_cold}/adopted-failure-run-partial"
+if bash "${evidence}" validate-cold-process "${missing_cold}" "${sha}" >/dev/null 2>&1; then
+  echo "missing cold/healing child evidence unexpectedly succeeded" >&2
+  exit 1
+fi
 
 if route unsupported docs/README.md >/dev/null 2>&1; then
   echo "unsupported validation mode unexpectedly succeeded" >&2
