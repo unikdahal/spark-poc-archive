@@ -34,6 +34,11 @@ stage="initialize"
 finalize() {
   local rc=$?
   if [[ ${rc} -ne 0 ]]; then
+    for partial in "${smoke_evidence:-}" "${conformance_evidence:-}"; do
+      if [[ -n "${partial}" && -s "${partial}" ]]; then
+        cat "${partial}" >> "${evidence_path}"
+      fi
+    done
     {
       printf 'failure_stage\t%s\n' "${stage}"
       printf 'runner_exit_code\t%s\n' "${rc}"
