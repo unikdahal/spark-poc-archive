@@ -29,6 +29,8 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -152,14 +154,14 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     Dataset<Row> latest1 = latestProjection(spark);
     Certificate latestAtSnapshot1 = requireCertified(certify(latest1));
     require(latestAtSnapshot1.snapshotId == snapshot1, "latest scan did not bind snapshot 1");
-    require(rowCount(latest1) == 256L, "snapshot 1 ordinary result changed");
+    require(checkedRows(latest1, 0L, 256L) == 256L, "snapshot 1 ordinary result changed");
 
     Dataset<Row> repeatedLatest1 = latestProjection(spark);
     Certificate repeatedLatest1Certificate = requireCertified(certify(repeatedLatest1));
     require(
         repeatedLatest1Certificate.sameIdentity(latestAtSnapshot1),
         "same resolved snapshot did not reproduce the same identity");
-    require(rowCount(repeatedLatest1) == 256L, "repeated snapshot 1 result changed");
+    require(checkedRows(repeatedLatest1, 0L, 256L) == 256L, "repeated snapshot 1 result changed");
 
     spark.range(256, 512)
         .repartition(8)
@@ -176,21 +178,21 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     require(
         !latestAtSnapshot1.sameIdentity(latestAtSnapshot2),
         "latest scan reused identity after the table advanced");
-    require(rowCount(latest2) == 512L, "snapshot 2 ordinary result changed");
+    require(checkedRows(latest2, 0L, 512L) == 512L, "snapshot 2 ordinary result changed");
 
     Dataset<Row> pinnedSnapshot1 = pinnedProjection(spark, snapshot1);
     Certificate pinnedSnapshot1Certificate = requireCertified(certify(pinnedSnapshot1));
     require(
         pinnedSnapshot1Certificate.sameIdentity(latestAtSnapshot1),
         "explicit snapshot 1 did not reproduce the original resolved scan identity");
-    require(rowCount(pinnedSnapshot1) == 256L, "pinned snapshot 1 ordinary result changed");
+    require(checkedRows(pinnedSnapshot1, 0L, 256L) == 256L, "pinned snapshot 1 ordinary result changed");
 
     Dataset<Row> filtered = latestProjection(spark).where("id >= 128");
     Certificate filteredCertificate = requireCertified(certify(filtered));
     require(
         !filteredCertificate.sameIdentity(latestAtSnapshot2),
         "changed pushed filter did not change source identity");
-    require(rowCount(filtered) == 384L, "filtered ordinary result changed");
+    require(checkedRows(filtered, 128L, 512L) == 384L, "filtered ordinary result changed");
 
     Dataset<Row> differentlySplit =
         spark.read()
@@ -207,7 +209,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
             differentlySplitCertificate.decompositionDigest,
             latestAtSnapshot2.decompositionDigest),
         "changed split option did not change mapper decomposition");
-    require(rowCount(differentlySplit) == 512L, "split option changed ordinary rows");
+    require(checkedRows(differentlySplit, 0L, 512L) == 512L, "split option changed ordinary rows");
 
     spark.sql("ALTER TABLE " + TABLE_NAME + " ADD COLUMN note STRING");
     Dataset<Row> sameProjectionAfterEvolution = latestProjection(spark);
@@ -216,14 +218,14 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     require(
         sameProjectionAfterEvolutionCertificate.sameIdentity(latestAtSnapshot2),
         "irrelevant schema addition changed the certified projected scan");
-    require(rowCount(sameProjectionAfterEvolution) == 512L, "schema addition changed old projection");
+    require(checkedRows(sameProjectionAfterEvolution, 0L, 512L) == 512L, "schema addition changed old projection");
 
     Dataset<Row> evolvedProjection = spark.table(TABLE_NAME).select("id", "payload", "note");
     Certificate evolvedProjectionCertificate = requireCertified(certify(evolvedProjection));
     require(
         !evolvedProjectionCertificate.sameIdentity(latestAtSnapshot2),
         "projecting an evolved field did not change source identity");
-    require(rowCount(evolvedProjection) == 512L, "schema evolution changed ordinary row count");
+    require(checkedRows(evolvedProjection, 0L, 512L) == 512L, "schema evolution changed ordinary row count");
 
     spark.sql(
         "CREATE TABLE "
@@ -448,6 +450,9 @@ public final class ShuffleRecoveryIcebergSourceSpike {
           if ((long) deleteFileCount + deletes.size() > Integer.MAX_VALUE) {
             return Decomposition.unsupported("delete-file-count-overflow");
           }
+          if (!deletes.isEmpty()) {
+            return Decomposition.unsupported("delete-bearing-scan-unreviewed");
+          }
           deleteFileCount += deletes.size();
 
           out.writeInt(taskIndex++);
@@ -547,6 +552,9 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     if (value == null) {
       throw new BoundExceededException("null-identity-string");
     }
+    if (value.length() > MAX_STRING_BYTES) {
+      throw new BoundExceededException("metadata-string-bound");
+    }
     byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
     if (bytes.length > MAX_STRING_BYTES) {
       throw new BoundExceededException("identity-string-bound");
@@ -560,11 +568,13 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     if (value == null) {
       throw new BoundExceededException("null-metadata-string");
     }
+    if (value.length() > MAX_STRING_BYTES) {
+      throw new BoundExceededException("metadata-string-bound");
+    }
     byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
     if (bytes.length > MAX_STRING_BYTES) {
       throw new BoundExceededException("metadata-string-bound");
     }
-    bounded.account(bytes.length);
     out.writeInt(bytes.length);
     out.write(bytes);
   }
@@ -592,7 +602,8 @@ public final class ShuffleRecoveryIcebergSourceSpike {
   }
 
   private static boolean boundedString(String value) {
-    return value != null && value.getBytes(StandardCharsets.UTF_8).length <= MAX_STRING_BYTES;
+    return value != null && value.length() <= MAX_STRING_BYTES
+        && value.getBytes(StandardCharsets.UTF_8).length <= MAX_STRING_BYTES;
   }
 
   private static ScanEvent matchingScanEvent(List<ScanEvent> events, String tableName) {
@@ -625,6 +636,22 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     while (children.hasNext()) {
       collectBatchScans(children.next(), scans);
     }
+  }
+
+  private static long checkedRows(Dataset<Row> dataset, long first, long end) {
+    List<Row> rows = dataset.collectAsList();
+    Set<Long> seen = new HashSet<>();
+    for (Row row : rows) {
+      require(!row.isNullAt(0), "unexpected null id");
+      long id = row.getLong(0);
+      require(id >= first && id < end && seen.add(id), "unexpected or duplicate id: " + id);
+      require(("v-" + id).equals(row.getString(1)), "wrong payload for id " + id);
+      if (row.size() == 3) {
+        require(row.isNullAt(2), "evolved field must be null for existing rows");
+      }
+    }
+    require(seen.size() == end - first, "missing expected rows");
+    return rows.size();
   }
 
   private static long rowCount(Dataset<Row> dataset) {
@@ -793,7 +820,20 @@ public final class ShuffleRecoveryIcebergSourceSpike {
           digest);
     }
 
-    void account(int bytes) {
+    @Override
+    public void write(int value) throws IOException {
+      account(1);
+      super.write(value);
+    }
+
+    @Override
+    public void write(byte[] bytes, int offset, int length) throws IOException {
+      Objects.checkFromIndexSize(offset, length, bytes.length);
+      account(length);
+      super.write(bytes, offset, length);
+    }
+
+    private void account(int bytes) {
       if (bytes < 0 || metadataBytes > MAX_HASHED_METADATA_BYTES - bytes) {
         throw new BoundExceededException("metadata-total-bound");
       }

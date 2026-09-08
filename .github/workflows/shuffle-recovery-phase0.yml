@@ -21,6 +21,7 @@ on:
   pull_request:
     branches: [spip/shuffle-recovery-experimental]
   push:
+    branches: [spip/poc-owned-end-to-end]
     tags:
       - 'shuffle-recovery-ci/full/*'
       - 'shuffle-recovery-ci/evidence/*'
@@ -308,7 +309,7 @@ jobs:
 
   gate:
     name: Exact experimental candidate gate
-    needs: [preflight, quality, core, sql]
+    needs: [preflight, quality, core, sql, iceberg-resolved-scan]
     if: always() && needs.preflight.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -340,7 +341,9 @@ jobs:
           SQL_COMPILATION: ${{ needs.sql.outputs.compilation }}
           SQL_TESTS: ${{ needs.sql.outputs.tests }}
           SQL_PROOF: ${{ needs.sql.outputs.proof }}
-        run: bash .github/scripts/shuffle-recovery-ci-gate.sh
+        run: |
+          test '${{ needs.iceberg-resolved-scan.result }}' = success
+          bash .github/scripts/shuffle-recovery-ci-gate.sh
       - name: Upload final gate evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -353,7 +356,7 @@ jobs:
         run: test '${{ steps.run.outcome }}' = success
 
   iceberg-resolved-scan:
-    name: Iceberg 1.11.0 resolved-scan certification (JDK 17)
+    name: Pinned Iceberg Spark 4.2 source conformance (JDK 17)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:

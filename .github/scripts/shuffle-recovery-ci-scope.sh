@@ -65,6 +65,12 @@ for path in "${paths[@]}"; do
   esac
 
   case "${path}" in
+    docs/shuffle-recovery/*.java|docs/shuffle-recovery/*.sh|docs/shuffle-recovery/*.py)
+      non_docs=true
+      workflow_build=true
+      mark_all_boundaries
+      ;;
+
     docs/*|*.md)
       docs=true
       ;;
@@ -102,6 +108,7 @@ for path in "${paths[@]}"; do
     core/src/test/scala/org/apache/spark/shuffle/sort/IndexShuffleBlockResolverSuite.scala|\
     core/src/test/scala/org/apache/spark/shuffle/sort/SortShuffleManagerSuite.scala)
       provider_publication_discovery=true
+      scheduler_tracker_reader_aqe_invalidation=true
       non_docs=true
       ;;
 
@@ -111,6 +118,7 @@ for path in "${paths[@]}"; do
     core/src/main/scala/org/apache/spark/shuffle/ReferenceShuffleRecoveryClaimProvider.scala)
       attempt_lifecycle=true
       provider_publication_discovery=true
+      scheduler_tracker_reader_aqe_invalidation=true
       non_docs=true
       ;;
 

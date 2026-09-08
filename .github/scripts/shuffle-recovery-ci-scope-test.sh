@@ -57,7 +57,7 @@ provider="$(route focused core/src/main/scala/org/apache/spark/shuffle/Reference
 expect "${provider}" provider_publication_discovery true
 expect "${provider}" identity_source false
 expect "${provider}" run_core true
-expect "${provider}" run_sql false
+expect "${provider}" run_sql true
 
 attempt="$(route focused core/src/main/scala/org/apache/spark/shuffle/ShuffleRecoveryPreparation.scala)"
 expect "${attempt}" attempt_lifecycle true

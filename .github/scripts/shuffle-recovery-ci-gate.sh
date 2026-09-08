@@ -61,7 +61,7 @@ if [[ "${integration_current}" != "${BASE_SHA}" ]]; then
   echo "STALE BASE: tested against ${BASE_SHA}, current ${INTEGRATION_BRANCH} is ${integration_current}" >&2
   freshness=failed
 fi
-if [[ "${EVENT_NAME}" == pull_request ]]; then
+if [[ "${EVENT_NAME}" == pull_request || "${HEAD_REF}" == spip/poc-owned-end-to-end ]]; then
   remote="$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 {print $1}')"
   subject=branch
 else

@@ -32,7 +32,10 @@ case "${command}" in
         requested="${actual}"
         ;;
       push)
-        if [[ "${ref_name}" =~ ^shuffle-recovery-ci/(full|evidence)/([0-9a-fA-F]{40})$ ]]; then
+        if [[ "${ref_name}" == spip/poc-owned-end-to-end ]]; then
+          mode=focused
+          requested="${actual}"
+        elif [[ "${ref_name}" =~ ^shuffle-recovery-ci/(full|evidence)/([0-9a-fA-F]{40})$ ]]; then
           mode="${BASH_REMATCH[1]}"
           requested="${BASH_REMATCH[2]}"
         else
