@@ -254,6 +254,24 @@ if bash "${evidence}" validate-report "${wrong_name}" org.apache.spark.shuffle.P
   exit 1
 fi
 
+wrong_class="${fixture}/wrong-class.xml"
+cat > "${wrong_class}" <<'XML'
+<testsuite name="org.apache.spark.shuffle.PresentSuite" tests="1" errors="0" failures="0" skipped="0">
+  <testcase classname="org.apache.spark.shuffle.OtherSuite" name="executes"/>
+</testsuite>
+XML
+if bash "${evidence}" validate-report "${wrong_class}" org.apache.spark.shuffle.PresentSuite >/dev/null 2>&1; then
+  echo "wrong testcase classname unexpectedly succeeded" >&2
+  exit 1
+fi
+
+empty_xml="${fixture}/empty.xml"
+: > "${empty_xml}"
+if bash "${evidence}" validate-report "${empty_xml}" org.apache.spark.shuffle.PresentSuite >/dev/null 2>&1; then
+  echo "empty XML unexpectedly succeeded" >&2
+  exit 1
+fi
+
 zero_report="${fixture}/zero.xml"
 printf '%s\n' '<testsuite name="org.apache.spark.shuffle.PresentSuite" tests="0" errors="0" failures="0" skipped="0"/>' > "${zero_report}"
 if bash "${evidence}" validate-report "${zero_report}" org.apache.spark.shuffle.PresentSuite >/dev/null 2>&1; then
