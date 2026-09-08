@@ -48,6 +48,12 @@ The next candidate records stable identity or a conservative miss and still requ
 The downloaded SQL artifact validates 39 cold child records, including nine successful replacements
 and ten negative controls, plus three healing child records against that exact candidate.
 
+Candidate `89f3c0673bf764f7a430c9886e45d39bcc978129`, Actions run `34274067280`, passed
+the pinned Iceberg smoke and source conformance job. Its artifact records a conservative certificate
+miss after unprojected schema evolution, preserved exact values, repeated/pinned snapshot identity,
+latest-snapshot advancement, changed split decomposition and preserved ordinary source errors.
+The additional row-delete refusal and shared-filesystem negative controls require a newer run.
+
 No performance, production authorization, AQE recovery or SPIP acceptance claim follows from these
 checks. Ordinary latest-source resolution and ordinary errors remain authoritative.
 
