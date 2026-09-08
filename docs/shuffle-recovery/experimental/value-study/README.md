@@ -43,8 +43,10 @@ The active package fixes:
   input scales, weights, resource limits, thresholds, and economics assumptions registered in v1;
 - a mandatory independent failure-free calibration on the integrated candidate with recovery
   disabled: 24 workload/scale cells x 5 ordinary runs = 120 no-failure attempts;
-- four primary failure offsets per workload/scale derived only from ordinary Spark progress elapsed
-  times, then frozen in `primary-failure-schedule-v2.json` before any restart timing begins;
+- four primary failure offsets per workload/scale derived only from ordinary producer-completion and
+  correct-result elapsed times, then frozen in `primary-failure-schedule-v2.json` before any restart
+  timing begins;
+- diagnostic downstream stage timestamps that cannot select or move a primary failure point;
 - the exact same frozen elapsed-time offset in the recovery-disabled and recovery-enabled arms;
 - no primary wait for publication, provider visibility, reuse success, or a recovery-only event;
 - after-the-fact publication-state accounting so late/failed/unavailable publication remains an
@@ -56,6 +58,8 @@ The active package fixes:
 - three separately registered no-failure overhead comparisons, each with 24 cells and 12 pairs per
   cell, totaling 72 cells / 864 pairs / 1,728 timed overhead attempts;
 - comparison-specific overhead randomization and paired-bootstrap seeds;
+- publication-overhead accounting that retains every publication-arm result rather than selecting
+  only successful publications;
 - failure-to-correct-result residual accounting, conservative timeout scoring, no outlier deletion,
   and fixed scenario composition;
 - >=20% restart improvement with lower 95% confidence bound above zero;
