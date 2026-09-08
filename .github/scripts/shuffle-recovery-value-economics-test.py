@@ -45,6 +45,7 @@ REQUIRED_CASES = {
 REQUIRED_TERMS = {"B", "H", "S", "T_initial", "P_initial", "T_retry", "P_retry"}
 RETRY_TERMS = ["B", "T_retry", "P_retry"]
 INITIAL_TERMS = ["H", "S", "T_initial", "P_initial"]
+GREENFIELD_FIXED_CAPACITY_TERMS = {"S", "T_initial", "P_initial", "T_retry", "P_retry"}
 
 
 def decimal(record, key):
@@ -162,8 +163,10 @@ def validate(contract):
     require(decimal(greenfield, "F") > 0, "greenfield comparison must charge fixed capacity")
     require(decimal(existing, "F") == 0, "existing-provider comparison must not charge greenfield capacity")
     require(
-        set(greenfield["marginalTermsCoveredByFixedCapacity"]).issubset(REQUIRED_TERMS),
-        "greenfield fixed-capacity exclusions must name known marginal terms",
+        set(greenfield["marginalTermsCoveredByFixedCapacity"]).issubset(
+            GREENFIELD_FIXED_CAPACITY_TERMS
+        ),
+        "greenfield fixed-capacity exclusions may cover only provider/storage/traffic marginal terms",
     )
     require(
         decimal(greenfield, "expectedNet") < decimal(existing, "expectedNet"),
