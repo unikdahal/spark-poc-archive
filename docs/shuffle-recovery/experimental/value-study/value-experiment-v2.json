@@ -36,15 +36,8 @@
     "orchestrator": "Kubernetes batch application relaunch",
     "source": "Apache Iceberg tables pinned to explicit snapshot ids",
     "shuffleProvider": "Apache Celeborn real durable remote-shuffle candidate",
-    "driver": {
-      "vCpu": 4,
-      "memoryGiB": 16
-    },
-    "executors": {
-      "count": 32,
-      "vCpuEach": 8,
-      "memoryGiBEach": 32
-    },
+    "driver": {"vCpu": 4, "memoryGiB": 16},
+    "executors": {"count": 32, "vCpuEach": 8, "memoryGiBEach": 32},
     "networkGbpsPerWorker": 10,
     "factInputScaleGiB": [16, 64, 256, 512],
     "nominalFactInputGiB": 256,
@@ -85,74 +78,18 @@
     ]
   },
   "cohort": [
-    {
-      "id": "W01",
-      "weight": 0.20,
-      "shape": "scan/filter/project -> hash exchange -> tenant-partitioned Window -> small result reduction"
-    },
-    {
-      "id": "W02",
-      "weight": 0.15,
-      "shape": "scan/filter/project -> hash exchange -> dimension-partitioned Window -> small result reduction"
-    },
-    {
-      "id": "S01",
-      "weight": 0.10,
-      "shape": "selective scan/filter/project -> single-partition exchange -> global Window -> small result reduction"
-    },
-    {
-      "id": "J01",
-      "weight": 0.25,
-      "shape": "fact scan/filter/project -> hash exchange -> sort-merge join -> global aggregate"
-    },
-    {
-      "id": "J02",
-      "weight": 0.20,
-      "shape": "fact scan/filter/project -> hash exchange -> sort-merge join -> later fresh aggregate shuffle"
-    },
-    {
-      "id": "E01",
-      "weight": 0.10,
-      "shape": "sparse scan/filter/project -> hash exchange -> Window, stressing empty blocks"
-    }
+    {"id": "W01", "weight": 0.20, "shape": "scan/filter/project -> hash exchange -> tenant-partitioned Window -> small result reduction"},
+    {"id": "W02", "weight": 0.15, "shape": "scan/filter/project -> hash exchange -> dimension-partitioned Window -> small result reduction"},
+    {"id": "S01", "weight": 0.10, "shape": "selective scan/filter/project -> single-partition exchange -> global Window -> small result reduction"},
+    {"id": "J01", "weight": 0.25, "shape": "fact scan/filter/project -> hash exchange -> sort-merge join -> global aggregate"},
+    {"id": "J02", "weight": 0.20, "shape": "fact scan/filter/project -> hash exchange -> sort-merge join -> later fresh aggregate shuffle"},
+    {"id": "E01", "weight": 0.10, "shape": "sparse scan/filter/project -> hash exchange -> Window, stressing empty blocks"}
   ],
   "primaryInputScales": [
-    {
-      "id": "I16",
-      "weight": 0.25,
-      "factGiB": 16,
-      "mapperMin": 96,
-      "mapperMax": 160,
-      "hashReducers": 200,
-      "singleReducers": 1
-    },
-    {
-      "id": "I64",
-      "weight": 0.25,
-      "factGiB": 64,
-      "mapperMin": 384,
-      "mapperMax": 640,
-      "hashReducers": 200,
-      "singleReducers": 1
-    },
-    {
-      "id": "I256",
-      "weight": 0.25,
-      "factGiB": 256,
-      "mapperMin": 1536,
-      "mapperMax": 2560,
-      "hashReducers": 200,
-      "singleReducers": 1
-    },
-    {
-      "id": "I512",
-      "weight": 0.25,
-      "factGiB": 512,
-      "mapperMin": 3072,
-      "mapperMax": 5120,
-      "hashReducers": 200,
-      "singleReducers": 1
-    }
+    {"id": "I16", "weight": 0.25, "factGiB": 16, "mapperMin": 96, "mapperMax": 160, "hashReducers": 200, "singleReducers": 1},
+    {"id": "I64", "weight": 0.25, "factGiB": 64, "mapperMin": 384, "mapperMax": 640, "hashReducers": 200, "singleReducers": 1},
+    {"id": "I256", "weight": 0.25, "factGiB": 256, "mapperMin": 1536, "mapperMax": 2560, "hashReducers": 200, "singleReducers": 1},
+    {"id": "I512", "weight": 0.25, "factGiB": 512, "mapperMin": 3072, "mapperMax": 5120, "hashReducers": 200, "singleReducers": 1}
   ],
   "primaryPlanPolicy": {
     "aqe": "tested Spark default; do not override in primary campaign",
@@ -167,6 +104,7 @@
   "failureSchedule": {
     "selectionPrinciple": "Primary failure intervention is a fixed elapsed-time offset from controller query start. Offsets are derived only from independent failure-free ordinary runs with recovery disabled and are then frozen before any primary restart timing.",
     "requiredFrozenArtifact": "primary-failure-schedule-v2.json",
+    "requiredFrozenArtifactRowCount": 24,
     "artifactMustExistBeforePrimaryTiming": true,
     "calibrationArm": "integrated candidate with recovery disabled",
     "calibrationFailureInjection": false,
@@ -178,9 +116,11 @@
     "calibrationUsesRestartTiming": false,
     "requiredOrdinaryObservables": [
       "target producer ShuffleMapStage completion elapsed from controller query start",
-      "first material downstream stage completion elapsed from controller query start",
-      "final material downstream stage submission elapsed from controller query start",
       "correct result verification elapsed from controller query start"
+    ],
+    "diagnosticOrdinaryObservables": [
+      "material downstream stage completion elapsed times from controller query start when present",
+      "material downstream stage submission elapsed times from controller query start when present"
     ],
     "offsetRounding": "nearest integer millisecond, ties to even",
     "failurePoints": [
@@ -188,43 +128,57 @@
         "id": "F0",
         "weight": 0.25,
         "name": "pre-producer-elapsed",
-        "offsetFormula": "0.5 * median(target producer completion elapsed ms)",
+        "offsetFormula": "0.5 * P, where P is median(target producer completion elapsed ms)",
         "intent": "represent an early failure that can occur before any reusable producer output exists"
       },
       {
         "id": "F1",
         "weight": 0.30,
         "name": "producer-boundary-elapsed",
-        "offsetFormula": "median(target producer completion elapsed ms)",
+        "offsetFormula": "P",
         "intent": "sample the producer/publication race without waiting for publication"
       },
       {
         "id": "F2",
         "weight": 0.30,
-        "name": "downstream-middle-elapsed",
-        "offsetFormula": "median(first material downstream stage completion elapsed ms)",
-        "intent": "sample an ordinary middle-progress point common to both arms"
+        "name": "post-producer-middle-elapsed",
+        "offsetFormula": "P + 0.50 * (Q - P), where Q is median(correct result verification elapsed ms)",
+        "intent": "sample the middle of the independently observed ordinary post-producer tail"
       },
       {
         "id": "F3",
         "weight": 0.15,
-        "name": "downstream-late-elapsed",
-        "offsetFormula": "median(final material downstream stage submission elapsed ms)",
-        "intent": "sample a late ordinary-progress point without a scheduler barrier"
+        "name": "post-producer-late-elapsed",
+        "offsetFormula": "P + 0.85 * (Q - P)",
+        "intent": "sample a late ordinary elapsed point while remaining strictly before the calibration median result boundary"
       }
     ],
     "freezeValidityRules": [
-      "all five calibration runs for every workload/input-scale cell expose every required ordinary observable",
+      "all five calibration runs for every workload/input-scale cell expose producer completion and correct-result verification",
+      "P is strictly positive and Q is strictly greater than P",
       "the four rounded offsets are strictly positive and strictly increasing",
-      "F3 is earlier than the minimum correct-result completion elapsed time across the five calibration runs",
+      "downstream stage timestamps are diagnostic only and cannot select or move an offset",
       "no publication, provider-visibility, reuse-success, or recovery-only event contributes to any offset"
     ],
-    "invalidCalibrationRule": "Do not start primary timing. Retain the failed dry-run evidence and create a new prospective campaign version or fix an external harness fault under the predeclared harness-replacement rule.",
+    "requiredArtifactRowFields": [
+      "workloadId",
+      "inputScaleId",
+      "five calibration attempt ids",
+      "producer completion elapsed ms for every calibration attempt",
+      "correct-result verification elapsed ms for every calibration attempt",
+      "diagnostic downstream stage elapsed timestamps when present",
+      "P and Q medians",
+      "rounded F0/F1/F2/F3 offsets",
+      "controller/build/deployment/source snapshot/provider/cluster identity",
+      "complete artifact digest"
+    ],
+    "invalidCalibrationRule": "Do not start primary timing. Retain the failed dry-run evidence and create a new prospective campaign version or replace only a predeclared external harness-fault attempt with a new attempt id.",
     "postFreezeMutationRule": "Any offset or schedule-row change after primary timing begins requires a new prospective campaign version; weights are never redistributed."
   },
   "controllerIntervention": {
     "queryStart": "controller monotonic timestamp captured immediately before submitting the query action",
-    "injectionRule": "for both arms, issue the driver-termination command when monotonic elapsed time reaches the frozen workload/input-scale/failure-point offset",
+    "activeQueryInjectionRule": "for both arms, if correct result has not already been verified, issue the driver-termination command when monotonic elapsed time reaches the frozen workload/input-scale/failure-point offset",
+    "completedQueryRule": "if correct result has already been verified before the frozen offset, do not terminate solely for measurement; classify CORRECT_RESULT_BEFORE_SCHEDULED_FAILURE with zero residual",
     "waitForPublication": false,
     "waitForSparkStageEventInPrimaryTrial": false,
     "synchronousProviderCheckAtInjection": false,
@@ -252,27 +206,18 @@
     "naturalCorrectResultBeforeInjection": {
       "classification": "CORRECT_RESULT_BEFORE_SCHEDULED_FAILURE",
       "replacement": false,
+      "terminationCommandIssued": false,
       "residualFailureToCorrectResultMs": 0,
       "scenarioWeightRedistribution": false,
       "reporting": "report count and registered scenario mass by arm, workload, scale, and failure point"
     },
-    "postFailureResidualMetric": "max(0, correct-result verification monotonic time - actual injection-command monotonic time)",
+    "postFailureResidualMetric": "if CORRECT_RESULT_BEFORE_SCHEDULED_FAILURE then 0, otherwise max(0, correct-result verification monotonic time - actual injection-command monotonic time)",
     "publicationOutcomeNeverControlsCohortMembership": true
   },
   "mechanismControls": {
     "publicationBoundaryControlsFromV1": [
-      {
-        "id": "M0",
-        "derivedFrom": "v1 F0",
-        "rule": "producer completed while durable publication is not yet visible",
-        "primaryScenarioWeight": 0.0
-      },
-      {
-        "id": "M1",
-        "derivedFrom": "v1 F1",
-        "rule": "durable publication visible before a downstream material stage completes",
-        "primaryScenarioWeight": 0.0
-      }
+      {"id": "M0", "derivedFrom": "v1 F0", "rule": "producer completed while durable publication is not yet visible", "primaryScenarioWeight": 0.0},
+      {"id": "M1", "derivedFrom": "v1 F1", "rule": "durable publication visible before a downstream material stage completes", "primaryScenarioWeight": 0.0}
     ],
     "use": "optional mechanism diagnostics only; they may use recovery-specific hooks but cannot replace or enter the primary deployment-value failure distribution, overhead gates, or economics"
   },
@@ -310,7 +255,7 @@
   },
   "restartStatistics": {
     "aggregateMetric": "1 - weighted_sum(recovery post-failure residual ms) / weighted_sum(control post-failure residual ms)",
-    "zeroResidualRule": "correct result before injection contributes a zero residual without replacement or weight redistribution",
+    "zeroResidualRule": "correct result before scheduled injection contributes a zero residual without replacement or weight redistribution",
     "zeroAggregateControlDenominator": "INDETERMINATE",
     "confidence": "paired stratified bootstrap over the 12 scored pairs within every fixed workload/input-scale/failure-point cell; never resample workload identities",
     "confidenceLevel": 0.95,
@@ -346,7 +291,8 @@
     },
     {
       "id": "OH_PUBLICATION",
-      "comparison": "recovery-enabled integrated candidate successfully publishing the target exchange with no injected failure vs the same integrated candidate with recovery disabled",
+      "comparison": "recovery-enabled integrated candidate with publication enabled and no injected failure vs the same integrated candidate with recovery disabled",
+      "publicationOutcomePolicy": "retain every publication-arm timed outcome, including successful, late, failed, or state-unknown publication; publication outcome never determines pair inclusion or replacement",
       "gateUpper95Max": 0.05,
       "cellDimensions": ["cohort id", "input scale"],
       "registeredCellCount": 24,
@@ -372,6 +318,7 @@
     "confidenceLevel": 0.95,
     "bootstrapResamples": 10000,
     "upperBound": "95th percentile of the bootstrap overhead distribution",
+    "publicationComparisonInterpretation": "OH_PUBLICATION measures the cost of enabling and attempting publication. Publication success rate and any successful-publication subset are descriptive only; the <=5% gate uses every registered publication-arm outcome.",
     "restartExperimentCountsExcluded": true
   },
   "gates": {
