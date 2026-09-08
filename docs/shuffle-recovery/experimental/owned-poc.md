@@ -41,21 +41,25 @@ correct payload. A metadata-only whole-file removal does not satisfy that check.
 
 ## Current evidence
 
-Candidate `a109e7c74882089dacf6fd9d02d19b7b15a8a2f1`, Actions run `34270239031`, passed
-routing, lint/license, Core, SQL and cold-process validation. Its Iceberg compatibility smoke passed,
-but source conformance failed on an unjustified unconditional schema-evolution identity assertion.
-The next candidate records stable identity or a conservative miss and still requires exact values.
+Candidate `89f3c0673bf764f7a430c9886e45d39bcc978129` passed the complete
+[Actions gate](https://github.com/unikdahal/spark/actions/runs/34274067280): routing, lint/license,
+Core, SQL, pinned Iceberg conformance and the shared-filesystem mechanism experiment.
+
 The downloaded SQL artifact validates 39 cold child records, including nine successful replacements
-and ten negative controls, plus three healing child records against that exact candidate.
+and ten negative controls, plus three healing child records against that exact candidate. Its NFS
+experiment mounted NFS 4.2, recovered 32 rows with the baseline digest, ran zero selected map tasks,
+and read 1,152 provider bytes across 30 nonempty blocks under a new shuffle ID. This is a small
+mechanism result, not a performance measurement or proof of production durability.
 
-Candidate `89f3c0673bf764f7a430c9886e45d39bcc978129`, Actions run `34274067280`, passed
-the pinned Iceberg smoke and source conformance job. Its artifact records a conservative certificate
-miss after unprojected schema evolution, preserved exact values, repeated/pinned snapshot identity,
-latest-snapshot advancement, changed split decomposition and preserved ordinary source errors.
-The additional row-delete refusal and shared-filesystem negative controls require a newer run.
+The Iceberg artifact records a conservative certificate miss after unprojected schema evolution,
+preserved exact values, repeated/pinned snapshot identity, latest-snapshot advancement, changed split
+decomposition and preserved ordinary source errors. The earlier candidate `a109e7c7488` had failed
+only the unconditional schema-evolution identity assertion; the corrected requirement now passes.
 
-No performance, production authorization, AQE recovery or SPIP acceptance claim follows from these
-checks. Ordinary latest-source resolution and ordinary errors remain authoritative.
+The additional row-delete refusal, shared-filesystem negative controls, child process provenance,
+complete scratch isolation and runtime cache require a newer run. No production authorization,
+AQE recovery, performance or SPIP acceptance claim follows from the completed checks. Ordinary
+latest-source resolution and ordinary errors remain authoritative.
 
 ## Validation workflow
 
