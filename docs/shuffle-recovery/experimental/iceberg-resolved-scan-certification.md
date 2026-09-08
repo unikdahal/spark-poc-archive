@@ -1,160 +1,189 @@
 # Iceberg resolved-scan certification spike
 
-## Decision
+## Decision status
 
-Apache Iceberg 1.11.0 can provide enough information to certify a deliberately narrow Spark batch
-snapshot scan, but the required information is not exposed through a stable connector-facing API.
-The feasibility adapter therefore remains out of tree with respect to Spark's normal source roots and
-uses Iceberg package-private scan classes from the pinned release. This is a positive feasibility
-result for the information content and a negative result for treating the current access path as a
-stable Spark source contract.
+There are two separate questions in this experiment and they must not be conflated.
 
-The prototype should require a future adapter boundary that receives a certificate from the exact
-resolved source scan. It should not reproduce the spike's package-private dependency or independently
-reload a table to discover a snapshot.
+**Source inspection:** Apache Iceberg's Spark 4.2 connector line contains the information needed to
+continue investigating a deliberately narrow resolved batch-scan certificate. The required scan
+state is still package-private and the planning-listener mechanism used by this spike is not a stable
+connector-facing API.
 
-## Pinned source
+**Executed compatibility:** a positive result exists only when the dedicated exact-head job builds
+the pinned Iceberg source revision below, passes the real-catalog/scan-planning smoke gate, executes
+the conformance cases, and uploads `runner_result\tPASS` together with the source commit and runtime
+artifact digest. A source-level inspection result by itself is not evidence that an Iceberg runtime is
+binary-compatible with this Spark candidate.
 
-The spike pins:
+The previously selected `iceberg-spark-runtime-4.0_2.13:1.11.0` pairing is explicitly rejected for
+this branch. It fails at runtime because Iceberg's `SparkView` was compiled to implement
+`org.apache.spark.sql.connector.catalog.View`, while this Spark candidate has the newer concrete
+`View` class shape.
 
-- Apache Iceberg `1.11.0`;
-- `iceberg-spark-runtime-4.0_2.13`;
-- Iceberg source tag `apache-iceberg-1.11.0` for the API review.
+## Pinned compatibility candidate
 
-The dependency is downloaded only by `dev/shuffle-recovery/iceberg-source-spike/run.sh`. It is not a
-Spark module dependency and is not added to Spark's runtime dependency graph.
+The conformance runner builds Iceberg directly from:
+
+- repository: `apache/iceberg`;
+- source commit: `e76d63584d7f83b102026749e1ae0f91813cb78e`;
+- source line: Spark 4.2 / Scala 2.13;
+- Gradle task: `:iceberg-spark:iceberg-spark-runtime-4.2_2.13:shadowJar`;
+- build invocation: `./gradlew --no-daemon -DsparkVersions=4.2
+  :iceberg-spark:iceberg-spark-runtime-4.2_2.13:shadowJar`.
+
+That commit includes the addition of Iceberg's Spark 4.2 connector plus the immediate build-cleanup
+follow-up. In that line, `SparkView` converts Iceberg view metadata into Spark's concrete
+`org.apache.spark.sql.connector.catalog.View` through `View.Builder` rather than implementing the old
+interface. The exact runtime jar is built in the isolated conformance working directory, is added only
+to the SQL test configuration for that invocation, and is never added to Spark's normal dependency
+graph.
+
+The runner records the resolved Iceberg source commit, the exact Spark candidate commit, the Gradle
+build task and a SHA-512 digest of the generated runtime jar. A newer Iceberg main revision or a
+released artifact must not be substituted without changing the recorded candidate and rerunning the
+same gates.
+
+## Compatibility smoke gate
+
+Before the larger conformance program runs,
+`ShuffleRecoveryIcebergCompatibilitySmoke` performs a cheap executable check against the exact built
+jar. It:
+
+1. verifies the candidate Spark `View` API has the expected concrete-class shape;
+2. loads the real `org.apache.iceberg.spark.SparkCatalog` class;
+3. initializes a Hadoop-backed Iceberg catalog;
+4. creates and writes a one-row Iceberg table;
+5. forces Spark batch-scan planning; and
+6. reads and checks the exact row value.
+
+A linkage error, catalog initialization failure, planning failure or wrong value produces an explicit
+FAILED smoke evidence record and a non-zero runner exit. The full certification experiment is not
+allowed to manufacture a PASS by shadowing Spark catalog classes or suppressing the failure.
 
 ## Why the certificate is derived from the executed scan
 
-Spark's `BatchScanExec` owns the resolved Data Source V2 `Scan`. For Iceberg 1.11.0 the concrete
-`SparkBatchQueryScan` caches the file tasks and task groups that it plans. `SparkBatch.toBatch()` then
-passes those same task groups to `SparkBatch.planInputPartitions()`, where each task group becomes one
-Spark input partition.
+Spark's `BatchScanExec` owns the resolved Data Source V2 `Scan`. The concrete Iceberg
+`SparkBatchQueryScan` caches the file tasks and task groups it plans, and `SparkBatch` consumes those
+same task groups when constructing Spark input partitions.
 
-The spike enters through that `BatchScanExec.scan` object and forces/reads the scan's cached task
-groups. It never loads the table again to decide which snapshot or files should be read.
+The spike enters through that `BatchScanExec.scan` object and reads the scan's cached task groups. It
+does not load the table again to decide which snapshot or files should be read.
 
-There is one important latest-snapshot race to avoid. Iceberg's `SnapshotScan.planFiles()` chooses the
-snapshot and emits a `ScanEvent` before planning files. Calling `SnapshotScan.snapshot()` after
-planning is not sufficient for an unpinned scan because it may observe a newer
-`table.currentSnapshot()`. The spike captures the synchronous `ScanEvent` on the planning thread and
-binds its snapshot ID, projection and pushed filter to the same planning operation that produced the
-cached task groups. A separately re-resolved table lookup is intentionally not used.
+There is an important mutable-latest race to avoid. Iceberg's `SnapshotScan.planFiles()` chooses the
+snapshot and emits a `ScanEvent` before planning files. Reading a separately resolved current snapshot
+after planning could observe a newer table state. The spike therefore captures the synchronous
+planning event on the planning thread and binds its snapshot ID, projection and pushed filter to the
+same operation that produced the cached task groups.
 
-Iceberg's listener registry has no unregister operation. The spike registers one bounded process-life
-listener and uses a `ThreadLocal` capture that is always removed in `finally`. That mechanism is
-acceptable only for this isolated conformance process. It is specifically **not** the recommended
-production extension point.
+Iceberg's listener registry has no unregister operation. The spike registers one process-life
+listener and uses a `ThreadLocal` capture that is removed in `finally`. This is acceptable only in the
+isolated conformance process and is not a recommended production extension point.
 
-## Certified scan facts
+## Current certificate contents
 
-For the supported slice the bounded identity contains:
+For the currently exercised, unpartitioned, no-delete batch-scan slice, the identity includes:
 
 - Iceberg table UUID from the resolved scan's table object;
-- the exact snapshot ID emitted by the same `planFiles()` operation;
-- projected Iceberg schema, including field IDs and types;
-- the Iceberg pushed filter expression including literal values;
+- the concrete snapshot ID from the same planning event;
+- projected Iceberg schema including field IDs and types;
+- the pushed Iceberg filter expression including literal values;
 - case-sensitivity policy;
-- effective split size, split lookback and open-file cost used by the underlying scan;
-- mapper/task/delete counts; and
-- a SHA-256 mapper-decomposition certificate.
+- effective split size, split lookback and open-file cost;
+- mapper/task counts; and
+- a SHA-256 ordered mapper-decomposition digest.
 
-The mapper-decomposition hash is built in input-partition order. Within each mapper it preserves file
-task order and covers:
+The decomposition stream covers data-file identity and physical split facts, task residuals, sequence
+facts and ordering. File locations contribute only to the digest and are not printed into CI evidence.
+No dense mapper-by-reducer state is constructed by this source-certification spike.
 
-- data-file content kind, location, format and partition-spec ID;
-- record count and physical file size;
-- data/file sequence numbers, first row ID and sort-order ID when present;
-- task byte start and length;
-- the task residual expression;
-- delete-file count and order; and
-- for every delete file, content kind, location, format, spec ID, record/file sizes, sequence numbers,
-  equality field IDs, referenced data file and deletion-vector offset/length when present.
+## Explicitly narrowed claims for outstanding coverage
 
-The supported spike is intentionally restricted to unpartitioned `FileScanTask` scans with no Spark
-runtime filters and no Iceberg grouping key. Partition transforms, runtime-filter replanning,
-incremental/changelog scans, metadata tables, aggregate/local scans and other unreviewed source
-features are recovery misses.
+This compatibility repair does **not** close the independent source-certification follow-ups around
+resource/value coverage. Until those cases are separately demonstrated, Gate A must interpret the
+positive result narrowly:
 
-## Boundedness and trust boundary
+- the conformance fixture exercises only scans whose planned file tasks have no attached delete
+  files; existing descriptor-encoding code is not evidence that position deletes, equality deletes
+  or deletion vectors are a certified read mode;
+- the existing larger conformance program proves snapshot/identity relationships and ordinary row
+  cardinality, while the compatibility smoke proves one exact value read; it does not yet constitute
+  complete multiset/value coverage for every mutation/evolution case;
+- the 64 MiB decomposition constant must not be described as a bound on all source-planning or
+  certification allocations. Source planning, schema/filter JSON materialization and the final
+  identity have separate costs/limits. The current bound is only part of the feasibility guardrail,
+  not a complete production memory contract; and
+- deployment-specific authorization has not been exercised. A missing-table error demonstrates only
+  that ordinary source-resolution errors are not converted into recovery hits.
 
-The adapter treats source planning state as untrusted for recovery purposes. It refuses certification
-when any configured bound is exceeded rather than allocating a representation proportional to an
-unbounded source response. The spike limits task groups, file tasks, delete files per task, individual
-strings, total metadata fed into the decomposition digest and final identity bytes. The durable
-certificate is O(1) in mapper/file metadata size: task detail is streamed into a fixed-size digest and
-is not copied into a dense mapper-by-reducer structure.
-
-Raw file locations are not printed into the evidence artifact. They contribute only to the
-decomposition digest.
+Accordingly, no delete-bearing scan, complete resource-boundary contract, or deployment authorization
+mode is claimed supported by this document. Those limitations remain safe because this spike is
+out-of-tree evidence and is not wired into scheduler adoption or recovery eligibility.
 
 ## Ordinary query semantics
 
-Recovery certification is an optional observation after ordinary source resolution. The adapter does
-not catch source planning exceptions and convert them into misses. This distinction is required:
+Recovery certification is an optional observation after ordinary source resolution. Source planning
+exceptions are not converted into cache misses followed by different source semantics:
 
-- **certificate unavailable after a valid scan resolves**: return an unsupported/miss result and let
-  the ordinary query execute unchanged;
-- **source resolution, snapshot selection or authorization fails**: propagate the ordinary Spark /
-  source error. Recovery does not substitute a historical snapshot and does not turn the error into a
-  cache miss followed by different source semantics.
+- when a valid resolved scan cannot produce the narrow certificate, recovery is unavailable and
+  ordinary execution remains authoritative;
+- when source resolution, snapshot selection or authorization fails, the ordinary Spark/source error
+  remains authoritative; and
+- recovery never selects an older snapshot on behalf of a mutable-latest query.
 
-The conformance program checks an unavailable/expired explicit snapshot and a missing source through
-ordinary planning. A deployment-specific authorization backend is not introduced by this spike; the
-same structural rule applies because certification is never allowed to authorize or re-resolve a
-query.
+The experiment does not mutate scheduler state, provider state, `MapOutputTracker`, or durable
+artifacts, and it performs no recovery I/O on the DAGScheduler event loop.
 
 ## Supported-feature matrix
 
-| Feature | Spike disposition | Reason |
+| Feature | Executed/claimed disposition | Reason |
 | --- | --- | --- |
-| Unpartitioned batch table scan | Certified | Exact cached task groups map to Spark input partitions. |
-| Mutable latest | Certified | Snapshot ID comes from the same `planFiles()` event; a later snapshot produces a different identity. |
-| Explicit snapshot ID | Certified while retained | The requested snapshot is resolved by ordinary Iceberg planning; after expiry the ordinary error is preserved. |
-| Projection / field IDs | Certified | Iceberg projected schema is encoded, including field IDs. |
-| Pushed filter | Certified | Iceberg expression JSON with literal values is encoded. |
-| Per-file residual | Certified | Each `FileScanTask.residual()` is part of mapper decomposition. |
-| Split planning | Certified | Effective split controls plus exact ordered task groups are covered. |
-| Delete files attached to file tasks | Descriptor supported | Delete content/sequence/equality/DV facts are hashed; no claim is made for unreviewed row-level scan modes outside the supported batch slice. |
-| Schema evolution outside the projection | Allowed when resolved projected schema/decomposition is unchanged | Recovery identity follows the scan used for execution, not unrelated table metadata. |
-| Schema evolution affecting projected fields | Miss | Projected field IDs/types change. |
-| Partitioned/grouped scans | Unsupported | Partition/group-key canonicalization has not been reviewed for this spike. |
-| Runtime-filter-dependent scans | Unsupported | Runtime filters may reset Iceberg tasks after initial planning. |
-| Incremental/changelog/streaming scans | Unsupported | Outside the batch snapshot scope. |
-| Aggregate/local metadata scans | Unsupported | They do not use the reviewed `SparkBatchQueryScan` path. |
-| Deployment-specific authorization | Ordinary source responsibility | Certification cannot grant access or replace a denied query with historical data. |
+| Real catalog initialization on this Spark candidate | Smoke-gated | Must pass against the exact built runtime before conformance. |
+| Unpartitioned batch table scan without delete files | Feasibility candidate | Exact cached task groups map to Spark input partitions. |
+| Mutable latest | Conformance case | Snapshot ID comes from the same planning event and advances with latest. |
+| Explicit retained snapshot ID | Conformance case | Ordinary Iceberg planning resolves the requested snapshot. |
+| Projection / field IDs | Identity input | Resolved projected schema is encoded. |
+| Pushed filter | Identity input | Iceberg expression encoding includes literals. |
+| Per-file residual | Decomposition input | Residual is included in ordered task hashing. |
+| Split planning | Conformance case | Effective split controls and task ordering affect identity/decomposition. |
+| Delete-bearing file tasks | **Not claimed supported** | No real attached-delete read/value case is executed by this experiment. |
+| Complete row multiset/value parity for every case | **Not yet claimed** | Current broad cases include cardinality checks; only the smoke gate asserts exact values. |
+| Complete 64 MiB certification allocation bound | **Not claimed** | Source planning/JSON materialization are outside that narrow stream guardrail. |
+| Partitioned/grouped scans | Unsupported | Partition/group-key canonicalization is unreviewed. |
+| Runtime-filter-dependent scans | Unsupported | Runtime filters can re-plan Iceberg tasks. |
+| Incremental/changelog/streaming scans | Unsupported | Outside batch snapshot scope. |
+| Aggregate/local metadata scans | Unsupported | Outside the reviewed batch-query scan path. |
+| Deployment-specific authorization | Not exercised | Authorization remains an ordinary source responsibility. |
 
 ## Deterministic conformance cases
 
-`dev/shuffle-recovery/iceberg-source-spike/run.sh <evidence.tsv>` compiles the external adapter only for
-the conformance invocation and runs the following relationships against ordinary Spark execution:
+`dev/shuffle-recovery/iceberg-source-spike/run.sh <evidence.tsv>` performs the pinned source build,
+smoke gate and larger conformance run. The larger run checks:
 
-1. the initial latest scan certifies its actual current snapshot and returns the expected rows;
-2. after an append advances latest, the new latest scan uses the new snapshot and has a different
-   identity;
-3. an explicit read of the retained old snapshot reproduces the original resolved-scan identity and
-   old rows;
-4. changing a pushed filter changes identity while ordinary filtered results remain correct;
-5. changing split planning changes the ordered mapper-decomposition certificate without changing
-   rows;
-6. schema evolution is compared at the projected-field boundary;
-7. an unsupported partitioned scan returns no recovery certificate but executes normally;
-8. after the old snapshot is expired, an explicit request for it preserves Iceberg's ordinary
-   planning error; and
-9. a missing source likewise fails in ordinary source resolution rather than becoming a recovery
-   decision.
+1. the initial latest scan binds its actual current snapshot;
+2. the same resolved snapshot reproduces identity;
+3. appending data advances latest and changes identity;
+4. explicitly reading the retained old snapshot reproduces the original identity;
+5. a changed pushed filter changes identity while ordinary execution remains available;
+6. a changed split option changes identity and mapper decomposition;
+7. schema evolution is compared at the projected-field boundary;
+8. an unsupported partitioned scan produces no certificate but still executes normally;
+9. an expired explicit snapshot preserves its ordinary source failure; and
+10. a missing source preserves ordinary source resolution failure.
 
-The runner writes the selected table UUID, concrete snapshot IDs, mapper/file/delete counts and PASS
-markers to its evidence file. CI uploads that file from the exact pull-request head.
+The runner creates its evidence file before fetching/building Iceberg. Any failed stage appends
+`failure_stage`, `runner_exit_code` and `runner_result\tFAILED`, so an early linkage/build failure
+still produces a downloadable diagnostic artifact. A PASS requires the smoke and conformance outputs,
+the exact source/runtime metadata and `runner_result\tPASS`. Missing success evidence remains a gate
+failure.
 
 ## Gap to a stable adapter
 
-The information required for a correct certificate exists in Iceberg 1.11.0, but assembling it today
-requires connector-private access plus a process-global planning listener. Neither should become a
-Spark API dependency. A production-quality source contract should instead let the source return a
-bounded immutable certificate from the same resolved scan object after all decomposition-affecting
-planning is fixed, together with an explicit unsupported result. It must preserve ordinary source and
-authorization errors separately from certificate unavailability.
+The required information is available in the investigated Iceberg connector internals, but assembling
+it still requires package-private access plus a process-global planning listener. Neither should
+become a Spark dependency. A production source contract should let the exact resolved scan provide a
+bounded immutable certificate after decomposition-affecting planning is fixed, with an explicit
+unsupported result and ordinary source/auth errors kept distinct.
 
-This spike therefore supports continuing the prototype with a narrow external Iceberg adapter, while
-recording a concrete API gap for any later stable design.
+This experiment therefore establishes only the behavior actually executed by the pinned candidate.
+It does not turn an unverified release label, source inspection, or descriptor encoding into a
+compatibility/support claim.
