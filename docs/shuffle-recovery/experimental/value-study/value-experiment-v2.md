@@ -323,6 +323,12 @@ paired stratified bootstrap over the 12 pairs in each workload/input-scale cell,
 replicates and the seed in the table. The upper 95% bound is the 95th percentile of the bootstrap
 overhead distribution. No restart failure-point dimension appears in an overhead cell.
 
+A non-harness timeout or failure in either overhead arm makes that overhead comparison
+`INDETERMINATE`; the raw pair is retained and is not replaced. A wrong result prevents the campaign
+from passing. Only a predeclared external harness fault may be replaced, with the invalid raw record
+still published and the replacement assigned a new attempt id. This is deliberately separate from
+the restart experiment's conservative timeout imputation.
+
 The all-miss arm must use naturally absent or incompatible candidates; validation cannot be weakened
 or short-circuited to manufacture a cheap miss.
 
