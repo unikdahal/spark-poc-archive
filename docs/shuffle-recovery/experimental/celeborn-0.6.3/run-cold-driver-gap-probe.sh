@@ -73,6 +73,20 @@ wait_for_log() {
   return 1
 }
 
+wait_for_service_log() {
+  local log_dir="$1"
+  local pattern="$2"
+  local attempts="$3"
+  local i
+  for ((i = 0; i < attempts; i++)); do
+    if grep -Eq "${pattern}" "${log_dir}"/* 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 cleanup() {
   set +e
   if [[ -n "${producer_pid:-}" ]] && kill -0 "${producer_pid}" 2>/dev/null; then
@@ -126,15 +140,13 @@ EOF
 export CELEBORN_HOME
 export CELEBORN_CONF_DIR="${CELEBORN_HOME}/conf"
 "${CELEBORN_HOME}/sbin/start-master.sh"
-master_log="$(find "${CELEBORN_HOME}/logs" -type f \( -name '*master*.out' -o -name '*master*.log' \) -print -quit)"
-if [[ -z "${master_log}" ]] || ! wait_for_log "${master_log}" "Master.*started\|Starting RPC Server \[Master\]" 30; then
+if ! wait_for_service_log "${CELEBORN_HOME}/logs" 'Master started|Starting RPC Server \[Master\]' 30; then
   find "${CELEBORN_HOME}/logs" -maxdepth 1 -type f -print -exec tail -100 {} \; >&2 || true
   fail "master did not become ready"
 fi
 
 "${CELEBORN_HOME}/sbin/start-worker.sh" "celeborn://127.0.0.1:${MASTER_PORT}"
-worker_log="$(find "${CELEBORN_HOME}/logs" -type f \( -name '*worker*.out' -o -name '*worker*.log' \) -print -quit)"
-if [[ -z "${worker_log}" ]] || ! wait_for_log "${worker_log}" "Register worker successfully\|Worker started" 30; then
+if ! wait_for_service_log "${CELEBORN_HOME}/logs" 'Register worker successfully|Worker started' 30; then
   find "${CELEBORN_HOME}/logs" -maxdepth 1 -type f -print -exec tail -100 {} \; >&2 || true
   fail "worker did not become ready"
 fi
