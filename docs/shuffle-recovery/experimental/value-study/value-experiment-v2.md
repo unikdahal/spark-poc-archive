@@ -3,26 +3,28 @@
 Status: **preregistered, not executed**
 
 This document prospectively repairs the primary failure intervention registered in
-`value-experiment-v1.md`. The v1 Markdown and JSON remain published unchanged as the historical
-preregistration. No primary restart timing, no primary overhead timing, and no real-source/real-provider
-value campaign had been executed before this revision. No benchmark was run to choose this revision.
+`value-experiment-v1.md`. The v1 Markdown and JSON remain published unchanged as historical
+preregistration evidence. No primary restart timing, no primary overhead timing, and no real
+source/provider value campaign had been executed before this revision. No benchmark was run to
+choose the revision.
 
-The correction is deliberately narrow: primary failures are now selected from independent ordinary
-failure-free runs and injected at fixed elapsed-time offsets that are identical in recovery-disabled
-and recovery-enabled arms. Recovery publication is observed, never awaited, at the failure boundary.
-The workload, deployment scenario, source/provider targets, producer grammar, workload weights, input
-scales, resource limits, cost rates, and prospective pass thresholds remain those registered in v1.
+The correction is deliberately narrow. Primary failures are selected from independent ordinary
+failure-free runs and injected at fixed elapsed-time offsets that are identical in the
+recovery-disabled and recovery-enabled arms. Recovery publication is observed after the fact; it is
+never awaited at the failure boundary. The workload, deployment scenario, producer grammar, weights,
+input scales, resource limits, cost rates, and prospective pass thresholds remain those registered in
+v1.
 
-Machine-readable companion: [`value-experiment-v2.json`](value-experiment-v2.json).
-The unchanged workload and cost companions remain
-[`workload-scope-v1.md`](workload-scope-v1.md) and [`cost-model-v1.md`](cost-model-v1.md).
+Machine-readable companion: [`value-experiment-v2.json`](value-experiment-v2.json). The unchanged
+workload and cost companions remain [`workload-scope-v1.md`](workload-scope-v1.md) and
+[`cost-model-v1.md`](cost-model-v1.md).
 
 ## Why v2 exists
 
 The v1 primary distribution used publication-dependent F0/F1 landmarks. A recovery-disabled control
 performs no recovery publication, so those landmarks did not define the same intervention in both
 arms. Waiting for publication in the recovery arm would also condition the failure on the
-optimization having already produced a usable artifact and would hide slow or unsuccessful
+optimization already having produced a usable artifact and would hide slow or unsuccessful
 publication as absent observations.
 
 v2 removes that arm dependence. The primary controller never asks whether reuse succeeded and never
@@ -65,7 +67,7 @@ Window, subqueries, runtime filters, unsupported UDF/native expressions, sampled
 and runtime-dependent scans remain excluded below the reusable producer. Default AQE and ordinary
 Spark plan settings remain required for primary evidence.
 
-The v1 workload and input-scale weights are unchanged:
+The v1 workload weights are unchanged:
 
 | Workload | Weight |
 | --- | ---: |
@@ -82,7 +84,7 @@ Each of `I16`, `I64`, `I256`, and `I512` retains equal 25% input-scale weight.
 
 Primary restart timing **must not begin** until a machine-readable
 `primary-failure-schedule-v2.json` has been produced from the integrated candidate on the registered
-source/provider deployment and frozen with the campaign evidence.
+deployment and frozen with the campaign evidence.
 
 The schedule is derived from ordinary execution only:
 
@@ -90,70 +92,82 @@ The schedule is derived from ordinary execution only:
 - no driver failure is injected;
 - no restart timing is collected;
 - 5 valid dry runs are required for each of 6 workloads x 4 input scales;
-- therefore the calibration is 24 cells / **120 failure-free attempts**;
+- therefore calibration is 24 cells / **120 failure-free attempts**;
 - cell execution order is deterministically shuffled with seed `557001`.
 
 For every dry run, the external controller records monotonic elapsed time from immediately before
-submitting the query action to four ordinary observables:
+submitting the query action to these required ordinary observables:
 
 1. completion of the target producer `ShuffleMapStage`;
-2. completion of the first material downstream stage after the target exchange;
-3. submission of the final material downstream stage;
-4. complete correct-result verification.
+2. complete correct-result verification.
 
-These are ordinary Spark/query-progress observations. Publication visibility, provider discovery,
-claim success, recovery eligibility, and any other recovery-only state are forbidden inputs to the
-schedule.
+Material downstream stage submission/completion timestamps are retained when present as diagnostics,
+but they do not select or move a failure point. This avoids relying on a particular number or ordering
+of downstream Spark stages.
 
-For each workload/input-scale cell the controller freezes four integer-millisecond offsets:
+Publication visibility, provider discovery, claim success, recovery eligibility, and every other
+recovery-only state are forbidden schedule inputs.
+
+For each workload/input-scale cell define:
+
+```text
+P = median(target producer completion elapsed ms)
+Q = median(correct-result verification elapsed ms)
+```
+
+The controller freezes four integer-millisecond offsets:
 
 | Failure point | Weight | Frozen offset rule |
 | --- | ---: | --- |
-| `F0` | 25% | 0.5 x median target-producer completion elapsed time |
-| `F1` | 30% | median target-producer completion elapsed time |
-| `F2` | 30% | median first material downstream-stage completion elapsed time |
-| `F3` | 15% | median final material downstream-stage submission elapsed time |
+| `F0` | 25% | `0.5 * P` |
+| `F1` | 30% | `P` |
+| `F2` | 30% | `P + 0.50 * (Q - P)` |
+| `F3` | 15% | `P + 0.85 * (Q - P)` |
 
 Offsets are rounded to the nearest integer millisecond, ties to even.
 
-A schedule row is valid only if all five dry runs expose every required ordinary observable, the
-rounded offsets are strictly positive and strictly increasing, and F3 is earlier than the minimum
-correct-result completion time observed in those five dry runs. All 24 rows must be valid and frozen
-before primary restart timing starts.
+A schedule row is valid only if all five dry runs expose producer completion and correct-result
+verification, `P > 0`, `Q > P`, and the four rounded offsets are strictly positive and strictly
+increasing. All 24 rows must be valid and frozen before primary restart timing starts.
 
-If the dry-run candidate cannot produce that schedule, primary timing does not start. The failed
-calibration evidence is retained. A material workload/schedule redesign requires a new prospective
-campaign version; it is not repaired by post-hoc weight redistribution.
+If calibration cannot produce that schedule, primary timing does not start. The failed dry-run
+evidence is retained. A material workload/schedule redesign requires a new prospective campaign
+version; it is not repaired by post-hoc weight redistribution.
 
-The frozen schedule artifact must contain enough evidence to reproduce each row, including workload
-id, scale id, the five calibration attempt ids, the four raw ordinary elapsed-time observations per
-attempt, the medians, the four rounded offsets, controller/build/deployment identity, and a digest of
-the complete artifact.
+The frozen artifact has exactly 24 workload/input-scale rows. Each row records workload id, scale id,
+the five calibration attempt ids, producer-completion and result-verification elapsed times for every
+attempt, diagnostic downstream stage timestamps when present, `P`, `Q`, rounded F0-F3 offsets, and
+controller/build/deployment/source-snapshot/provider/cluster identity. The complete artifact also
+carries a digest.
 
 ## Identical primary intervention in both arms
 
-For every primary pair, the control and recovery attempts use the same frozen schedule row, source
-snapshots, input scale, cluster shape, and controller semantics.
+For every primary pair, control and recovery use the same frozen schedule row, source snapshots,
+input scale, cluster shape, and controller semantics.
 
 The controller:
 
 1. captures a monotonic `queryStart` immediately before submitting the query action;
 2. looks up the already-frozen `(workload, scale, failure point)` offset;
-3. issues the driver-termination command when monotonic elapsed time reaches that offset;
-4. never waits for publication, a Spark stage event, provider visibility, or reuse success in the
+3. if the correct result has not already been verified, issues the driver-termination command when
+   monotonic elapsed time reaches that offset;
+4. if the correct result was already verified, does not terminate a completed query solely for
+   measurement and records the zero-impact classification below;
+5. never waits for publication, a Spark stage event, provider visibility, or reuse success in the
    primary trial.
 
 The scheduled elapsed offset is therefore the intended intervention in both arms. There is no
-recovery-disabled translation and no arm-specific branch in the failure controller.
+recovery-disabled translation and no arm-specific failure landmark.
 
-The actual termination-command timestamp is recorded. Absolute error from the frozen target must be
-at most **500 ms**. A larger error is `HARNESS_INVALID_CONTROLLER_TIMING`: the raw record remains
-published and may be replaced only as a declared harness fault with a new attempt id. Outcome,
-publication state, or observed speed never determines whether a timing record is replaced.
+For an active query, the actual termination-command timestamp is recorded. Absolute error from the
+frozen target must be at most **500 ms**. A larger error is
+`HARNESS_INVALID_CONTROLLER_TIMING`: the raw record remains published and may be replaced only as a
+predeclared harness fault with a new attempt id. Outcome, publication state, or observed speed never
+determines whether a timing record is replaced.
 
-A failed termination command, controller crash, or inability to observe the correct-result boundary
-is likewise a harness fault rather than a recovery miss. Harness faults are reported separately and
-cannot be reclassified from performance outcomes.
+A failed termination command, controller crash, or inability to observe the required correctness
+boundary is likewise a harness fault rather than a recovery miss. Harness faults are reported
+separately and cannot be reclassified from performance outcomes.
 
 ## Producer completion and early failures
 
@@ -166,9 +180,8 @@ so recovery must miss/fall back if ordinary correctness permits. The failure is 
 scenario weight is not reassigned to a later failure point.
 
 `F1` is intentionally a producer-boundary **elapsed-time** sample, not a post-publication sample. On
-one repetition the producer may have completed before the failure and on another it may not have.
-That variation is evidence about the deployment timing distribution, not a reason to move the
-failure.
+one repetition the producer may have completed before failure and on another it may not have. That
+variation is evidence about the deployment timing distribution, not a reason to move the failure.
 
 ## Publication races are observations, not barriers
 
@@ -191,14 +204,14 @@ therefore misses, the full fallback time remains in the recovery arm. If telemet
 the publication classification is unknown but the timed outcome remains usable unless some separate
 required correctness/timing evidence is missing.
 
-For a publication event racing the failure, classification compares the telemetry event timestamp
-with the actual termination-command timestamp after the fact. There is no publication barrier in the
-query, scheduler, or controller.
+For a publication event racing the failure, classification compares its audit timestamp with the
+actual termination-command timestamp after the fact. There is no publication barrier in the query,
+scheduler, or controller.
 
 ## Natural completion before the scheduled failure
 
-A query may naturally produce and verify its correct result before a frozen late failure offset.
-That is not a reason to shift the failure earlier or to drop the repetition.
+A query may naturally produce and verify its correct result before a frozen late failure offset. That
+is not a reason to shift the failure earlier or to drop the repetition.
 
 The attempt is classified `CORRECT_RESULT_BEFORE_SCHEDULED_FAILURE`, receives a post-failure residual
 of **0 ms**, is not replaced, and retains its registered scenario weight. Counts and scenario mass are
@@ -207,13 +220,15 @@ reported by arm, workload, input scale, and failure point.
 For all attempts the primary residual is:
 
 ```text
-max(0, correct_result_verification_time - actual_termination_command_time)
+if correct result was verified before the scheduled injection:
+  0
+else:
+  max(0, correct_result_verification_time - actual_termination_command_time)
 ```
 
-This explicitly keeps zero-impact late failure opportunities in the registered population instead of
-conditioning the headline result on the query still being alive at a favorable recovery state. If
-the aggregate control denominator is zero, the campaign is `INDETERMINATE` rather than inventing a
-ratio.
+This keeps zero-impact late failure opportunities in the registered population instead of
+conditioning the headline result on a query still being alive at a favorable recovery state. If the
+aggregate control denominator is zero, the campaign is `INDETERMINATE` rather than inventing a ratio.
 
 ## Optional publication-boundary mechanism controls
 
@@ -228,7 +243,7 @@ headline restart estimate, cannot enter any overhead gate, and cannot enter depl
 
 ## Primary restart experiment counts and pairing
 
-The primary restart campaign still has:
+The primary restart campaign has:
 
 ```text
 6 workloads x 4 input scales x 4 frozen failure offsets = 96 cells
@@ -257,7 +272,7 @@ Predetermined timeout scoring remains conservative, applied to the post-failure 
 For each pair, let `T_control` and `T_recovery` be the observed or predeclared-imputed post-failure
 residuals.
 
-Headline improvement remains:
+Headline improvement is:
 
 ```text
 1 - weighted_sum(T_recovery) / weighted_sum(T_control)
@@ -282,14 +297,14 @@ comparisons. v2 preregisters those comparisons independently.
 Each overhead comparison has 6 workloads x 4 input scales = **24 cells**, with 12 paired repetitions
 per cell, hence **288 pairs / 576 timed attempts** per comparison.
 
-| Id | No-failure comparison | Seed | Bootstrap seed | Upper 95% gate |
+| Id | No-failure comparison | Randomization seed | Bootstrap seed | Upper 95% gate |
 | --- | --- | ---: | ---: | ---: |
 | `OH_DISABLED` | recovery-disabled integrated candidate vs frozen upstream baseline | 557101 | 55101 | <=1% |
-| `OH_ALL_MISS` | recovery-enabled naturally absent/incompatible candidate vs same candidate recovery-disabled | 557102 | 55102 | <=5% |
-| `OH_PUBLICATION` | recovery-enabled successful publication vs same candidate recovery-disabled | 557103 | 55103 | <=5% |
+| `OH_ALL_MISS` | recovery-enabled naturally absent/incompatible candidates vs same candidate recovery-disabled | 557102 | 55102 | <=5% |
+| `OH_PUBLICATION` | recovery-enabled candidate with publication enabled vs same candidate recovery-disabled | 557103 | 55103 | <=5% |
 
-Across all three overhead comparisons this is **72 registered cells / 864 pairs / 1,728 timed
-attempts**, separate from the restart campaign.
+Across all three comparisons this is **72 registered cells / 864 pairs / 1,728 timed attempts**,
+separate from the restart campaign.
 
 Within every overhead cell, six pairs are reference-first and six are treatment-first according to
 the comparison-specific seed. There is no failure injection. Cache warmth, 1,800-second timeout, and
@@ -309,8 +324,13 @@ replicates and the seed in the table. The upper 95% bound is the 95th percentile
 overhead distribution. No restart failure-point dimension appears in an overhead cell.
 
 The all-miss arm must use naturally absent or incompatible candidates; validation cannot be weakened
-or short-circuited to manufacture a cheap miss. The publication arm must actually publish the target
-exchange without a driver failure.
+or short-circuited to manufacture a cheap miss.
+
+`OH_PUBLICATION` measures the cost of **enabling and attempting publication**, not a survivor-only
+successful-publication cohort. Every timed publication-arm outcome is retained, including successful,
+late, failed, or publication-state-unknown outcomes. Publication success rate and any
+successful-publication subset may be reported descriptively, but the <=5% gate uses every registered
+publication-arm result.
 
 ## Failure probability and economics
 
