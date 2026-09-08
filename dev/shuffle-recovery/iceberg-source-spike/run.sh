@@ -104,7 +104,6 @@ stage="compile-and-run-compatibility-smoke"
 
 test -s "${smoke_evidence}"
 grep -F $'result\tPASS' "${smoke_evidence}"
-cat "${smoke_evidence}" >> "${evidence_path}"
 
 stage="run-resolved-scan-conformance"
 ./build/sbt -Phadoop-3 -Phive \
@@ -117,6 +116,6 @@ test -s "${conformance_evidence}"
 grep -F $'result\tPASS' "${conformance_evidence}"
 grep -F $'decision\tRESOLVED_SCAN_CERTIFICATION_FEASIBLE_WITH_PRIVATE_ICEBERG_HOOKS' \
   "${conformance_evidence}"
-cat "${conformance_evidence}" >> "${evidence_path}"
+cat "${smoke_evidence}" "${conformance_evidence}" >> "${evidence_path}"
 printf 'runner_result\tPASS\n' >> "${evidence_path}"
 cat "${evidence_path}"
