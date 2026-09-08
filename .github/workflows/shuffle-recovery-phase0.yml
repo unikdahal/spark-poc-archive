@@ -1,10 +1,10 @@
 #
-# Licensed to the Apache Software Foundation (ASF) under one or more
-# contributor license agreements.  See the NOTICE file distributed with
-# this work for additional information regarding copyright ownership.
-# The ASF licenses this file to You under the Apache License, Version 2.0
-# (the "License"); you may not use this file except in compliance with
-# the License.  You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file to You under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
 #    http://www.apache.org/licenses/LICENSE-2.0
 #
@@ -15,53 +15,185 @@
 # limitations under the License.
 #
 
-name: Shuffle recovery experimental
+name: Shuffle recovery Phase 0
 
 on:
   pull_request:
     branches:
       - spip/shuffle-recovery-experimental
   workflow_dispatch:
+    inputs:
+      validation_mode:
+        description: Validation tier to execute
+        required: true
+        default: focused
+        type: choice
+        options:
+          - focused
+          - full
+          - evidence
+      candidate_sha:
+        description: Exact 40-character candidate SHA (required for full/evidence)
+        required: false
+        type: string
+      evidence_target:
+        description: Heavy evidence lane (used only in evidence mode)
+        required: true
+        default: opportunity
+        type: choice
+        options:
+          - opportunity
+          - cold-process
+          - all
 
 permissions:
   contents: read
 
 concurrency:
-  group: shuffle-recovery-experimental-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: >-
+    shuffle-recovery-experimental-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+env:
+  INTEGRATION_BRANCH: spip/shuffle-recovery-experimental
+
 jobs:
-  hygiene:
-    name: Patch hygiene
+  preflight:
+    name: Scope and Tier 0 routing
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      base_sha: ${{ steps.integration-base.outputs.sha }}
+      candidate_sha: ${{ steps.candidate.outputs.sha }}
+      validation_mode: ${{ steps.scope.outputs.validation_mode }}
+      evidence_target: ${{ steps.scope.outputs.evidence_target }}
+      workflow: ${{ steps.scope.outputs.workflow }}
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+      scala: ${{ steps.scope.outputs.scala }}
+      java: ${{ steps.scope.outputs.java }}
+      sql_opportunity: ${{ steps.scope.outputs.sql_opportunity }}
+      core_provider: ${{ steps.scope.outputs.core_provider }}
+      manifest: ${{ steps.scope.outputs.manifest }}
+      claim: ${{ steps.scope.outputs.claim }}
+      scheduler: ${{ steps.scope.outputs.scheduler }}
+      cold_process: ${{ steps.scope.outputs.cold_process }}
+      adopted_failure: ${{ steps.scope.outputs.adopted_failure }}
+      core_other: ${{ steps.scope.outputs.core_other }}
+      sql_other: ${{ steps.scope.outputs.sql_other }}
+      run_style: ${{ steps.scope.outputs.run_style }}
+      run_core: ${{ steps.scope.outputs.run_core }}
+      run_opportunity: ${{ steps.scope.outputs.run_opportunity }}
+      run_cold_process: ${{ steps.scope.outputs.run_cold_process }}
+      run_evidence_opportunity: ${{ steps.scope.outputs.run_evidence_opportunity }}
+      run_evidence_cold_process: ${{ steps.scope.outputs.run_evidence_cold_process }}
+
     steps:
-      - name: Checkout requested head
+      - name: Checkout exact requested head
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: >-
+            ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha ||
+                github.event.pull_request.head.sha || github.sha }}
 
-      - name: Check patch whitespace
+      - name: Validate requested mode and candidate
+        id: candidate
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode || 'focused' }}
+          REQUESTED_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || '' }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" && \
+                ("${REQUESTED_MODE}" == "full" || "${REQUESTED_MODE}" == "evidence") ]]; then
+            if [[ ! "${REQUESTED_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "full/evidence dispatch requires an exact 40-character candidate_sha" >&2
+              exit 1
+            fi
+            if [[ "${REF_TYPE}" != "branch" ]]; then
+              echo "full/evidence dispatch must target a branch so exact-head freshness can be checked" >&2
+              exit 1
+            fi
+            if [[ "${actual,,}" != "${REQUESTED_SHA,,}" ]]; then
+              echo "checked out ${actual}, expected candidate ${REQUESTED_SHA}" >&2
+              exit 1
+            fi
+          elif [[ -n "${REQUESTED_SHA}" && "${actual,,}" != "${REQUESTED_SHA,,}" ]]; then
+            echo "checked out ${actual}, expected candidate ${REQUESTED_SHA}" >&2
+            exit 1
+          fi
+          echo "sha=${actual}" >> "${GITHUB_OUTPUT}"
+
+      - name: Determine integration base
+        id: integration-base
         shell: bash
         run: |
           set -euo pipefail
           git fetch --no-tags origin \
-            spip/shuffle-recovery-experimental:refs/remotes/origin/spip/shuffle-recovery-experimental
-          base="$(git merge-base HEAD origin/spip/shuffle-recovery-experimental)"
-          git diff --check "${base}...HEAD"
+            "${INTEGRATION_BRANCH}:refs/remotes/origin/${INTEGRATION_BRANCH}"
+          base="$(git merge-base HEAD "refs/remotes/origin/${INTEGRATION_BRANCH}")"
+          echo "sha=${base}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check patch whitespace
+        env:
+          BASE_SHA: ${{ steps.integration-base.outputs.sha }}
+        run: git diff --check "${BASE_SHA}...HEAD"
+
+      - name: Validate routing contract
+        run: bash .github/scripts/shuffle-recovery-ci-scope-test.sh
+
+      - name: Classify changed paths
+        id: scope
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.integration-base.outputs.sha }}
+          VALIDATION_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode || 'focused' }}
+          EVIDENCE_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.evidence_target || 'opportunity' }}
+        run: |
+          set -euo pipefail
+          changed="${RUNNER_TEMP}/shuffle-recovery-changed-paths.txt"
+          git diff --name-only "${BASE_SHA}...HEAD" | sed '/^$/d' > "${changed}"
+          mapfile -t paths < "${changed}"
+          route="${RUNNER_TEMP}/shuffle-recovery-route.txt"
+          bash .github/scripts/shuffle-recovery-ci-scope.sh \
+            "${VALIDATION_MODE}" "${EVIDENCE_TARGET}" "${paths[@]}" > "${route}"
+          cat "${route}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Shuffle recovery validation routing"
+            echo
+            echo "Candidate: \`${{ steps.candidate.outputs.sha }}\`"
+            echo "Integration base: \`${BASE_SHA}\`"
+            echo
+            echo '```text'
+            cat "${route}"
+            echo '```'
+            echo
+            echo "Changed paths:"
+            if [[ -s "${changed}" ]]; then
+              sed 's/^/- `/' "${changed}" | sed 's/$/`/'
+            else
+              echo "- (none; mode controls applicability)"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   style:
-    name: Scala style
+    name: Affected style checks (JDK 17)
+    needs: preflight
+    if: needs.preflight.outputs.run_style == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     steps:
-      - name: Checkout requested head
+      - name: Checkout exact candidate
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
 
       - name: Install Java 17
         uses: actions/setup-java@v5
@@ -69,33 +201,42 @@ jobs:
           distribution: zulu
           java-version: 17
 
-      - name: Cache build dependencies
+      - name: Cache SBT and Maven launchers
         uses: actions/cache@v5
         with:
           path: |
             build/apache-maven-*
             build/*.jar
             ~/.sbt
-            ~/.cache/coursier
-          key: shuffle-recovery-experimental-style-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties', 'build/sbt') }}
+          key: shuffle-recovery-build-${{ runner.os }}-${{ hashFiles('**/pom.xml', 'project/build.properties', 'build/mvn', 'build/sbt', 'build/sbt-launch-lib.bash', 'build/spark-build-info') }}
           restore-keys: |
-            shuffle-recovery-experimental-style-${{ runner.os }}-
             shuffle-recovery-build-${{ runner.os }}-
+            build-${{ runner.os }}-
 
-      - name: Run Scala style checks
+      - name: Run Scala style when Scala or workflow routing is affected
+        if: >-
+          needs.preflight.outputs.scala == 'true' ||
+          needs.preflight.outputs.workflow == 'true'
         run: timeout --signal=TERM 20m ./dev/scalastyle "-Phadoop-3 -Phive"
 
-  source-identity:
-    name: Source identity contract and cross-JVM proof (SQL, JDK 17)
+      - name: Run Java checkstyle when Java is affected
+        if: needs.preflight.outputs.java == 'true'
+        run: ./dev/lint-java
+
+  core-recovery:
+    name: Focused Core recovery boundary (JDK 17)
+    needs: preflight
+    if: needs.preflight.outputs.run_core == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
+
     steps:
-      - name: Checkout requested head
+      - name: Checkout exact candidate
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
 
       - name: Install Java 17
         uses: actions/setup-java@v5
@@ -103,38 +244,257 @@ jobs:
           distribution: zulu
           java-version: 17
 
-      - name: Cache build dependencies
+      - name: Cache SBT and Maven launchers
         uses: actions/cache@v5
         with:
           path: |
             build/apache-maven-*
             build/*.jar
             ~/.sbt
-            ~/.cache/coursier
-          key: shuffle-recovery-experimental-source-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties', 'build/sbt') }}
+          key: shuffle-recovery-build-${{ runner.os }}-${{ hashFiles('**/pom.xml', 'project/build.properties', 'build/mvn', 'build/sbt', 'build/sbt-launch-lib.bash', 'build/spark-build-info') }}
           restore-keys: |
-            shuffle-recovery-experimental-source-${{ runner.os }}-
             shuffle-recovery-build-${{ runner.os }}-
+            build-${{ runner.os }}-
+
+      - name: Cache Coursier repository
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/coursier
+          key: shuffle-recovery-coursier-${{ runner.os }}-17-${{ hashFiles('**/pom.xml', '**/plugins.sbt') }}
+          restore-keys: |
+            shuffle-recovery-coursier-${{ runner.os }}-17-
+            coursier-${{ runner.os }}-17-
+            coursier-${{ runner.os }}-
+
+      - name: Compile Core production and test code
+        shell: bash
+        run: |
+          set -uo pipefail
+          diagnostic_dir="${GITHUB_WORKSPACE}/core/target/shuffle-recovery-phase0"
+          mkdir -p "${diagnostic_dir}"
+          compile_log="${diagnostic_dir}/core-test-compile.log"
+          set +e
+          ./build/sbt -Phadoop-3 "core/Test/compile" 2>&1 | tee "${compile_log}"
+          compile_status=${PIPESTATUS[0]}
+          set -e
+          if [[ ${compile_status} -ne 0 ]]; then
+            {
+              echo "### core/Test/compile diagnostics"
+              echo '```text'
+              if ! grep -E '^\[error\]' "${compile_log}" | tail -n 200; then
+                tail -n 200 "${compile_log}"
+              fi
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          exit "${compile_status}"
+
+      - name: Run applicable Core suites in one SBT session
+        id: core-suites
+        shell: bash
+        env:
+          MODE: ${{ needs.preflight.outputs.validation_mode }}
+          WORKFLOW_CHANGED: ${{ needs.preflight.outputs.workflow }}
+          PROVIDER_CHANGED: ${{ needs.preflight.outputs.core_provider }}
+          MANIFEST_CHANGED: ${{ needs.preflight.outputs.manifest }}
+          CLAIM_CHANGED: ${{ needs.preflight.outputs.claim }}
+          SCHEDULER_CHANGED: ${{ needs.preflight.outputs.scheduler }}
+          FAILURE_CHANGED: ${{ needs.preflight.outputs.adopted_failure }}
+          CORE_OTHER: ${{ needs.preflight.outputs.core_other }}
+        run: |
+          set -euo pipefail
+          provider=false
+          manifest=false
+          scheduler=false
+          if [[ "${MODE}" == "full" || "${WORKFLOW_CHANGED}" == "true" || \
+                "${CORE_OTHER}" == "true" ]]; then
+            provider=true
+            manifest=true
+            scheduler=true
+          else
+            [[ "${PROVIDER_CHANGED}" == "true" ]] && provider=true
+            if [[ "${MANIFEST_CHANGED}" == "true" || "${CLAIM_CHANGED}" == "true" || \
+                  "${FAILURE_CHANGED}" == "true" ]]; then
+              manifest=true
+            fi
+            [[ "${SCHEDULER_CHANGED}" == "true" ]] && scheduler=true
+          fi
+
+          suites=(org.apache.spark.shuffle.ShuffleRecoveryComputationIdentitySuite)
+          if [[ "${provider}" == "true" ]]; then
+            suites+=(
+              org.apache.spark.shuffle.ReferenceShuffleProviderSuite
+              org.apache.spark.shuffle.sort.IndexShuffleBlockResolverSuite
+              org.apache.spark.shuffle.sort.SortShuffleManagerSuite)
+          fi
+          if [[ "${manifest}" == "true" ]]; then
+            suites+=(org.apache.spark.shuffle.ShuffleRecoveryManifestSuite)
+          fi
+          if [[ "${scheduler}" == "true" ]]; then
+            suites+=(
+              org.apache.spark.scheduler.DAGSchedulerSuite
+              org.apache.spark.MapOutputTrackerSuite)
+          fi
+
+          command="core/testOnly"
+          for suite in "${suites[@]}"; do
+            command+=" ${suite}"
+          done
+          ./build/sbt -Phadoop-3 "${command}"
+
+          printf '%s\n' "${suites[@]}" > "${RUNNER_TEMP}/expected-core-suites.txt"
+          echo "provider=${provider}" >> "${GITHUB_OUTPUT}"
+
+      - name: Prove canonical identity bytes are stable across independent JVMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          vector="${RUNNER_TEMP}/shuffle-recovery-computation-identity.bin"
+          rm -f "${vector}"
+          ./build/sbt -Phadoop-3 \
+            "project core" \
+            "set Test / run / fork := true" \
+            "Test/runMain org.apache.spark.shuffle.ShuffleRecoveryComputationIdentityProcess write ${vector}"
+          ./build/sbt -Phadoop-3 \
+            "project core" \
+            "set Test / run / fork := true" \
+            "Test/runMain org.apache.spark.shuffle.ShuffleRecoveryComputationIdentityProcess compare ${vector}"
+          test -s "${vector}"
+
+      - name: Run independent-JVM persistent read proof when provider is applicable
+        if: steps.core-suites.outputs.provider == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_root="${RUNNER_TEMP}/shuffle-recovery-reference-provider-${GITHUB_RUN_ID}"
+          report="${GITHUB_WORKSPACE}/core/target/shuffle-recovery-phase0/reference-provider/read-representation.md"
+          rm -rf "${proof_root}"
+          mkdir -p "$(dirname "${report}")"
+
+          ./build/sbt -Phadoop-3 \
+            "project core" \
+            "set Test / run / fork := true" \
+            "Test/runMain org.apache.spark.shuffle.ReferenceShuffleProviderProcess write ${proof_root}" \
+            "Test/runMain org.apache.spark.shuffle.ReferenceShuffleProviderProcess read ${proof_root} ${report}"
+
+          grep -q 'Selected Spark extension points' "${report}"
+          grep -q '40 + 16R' "${report}"
+          grep -q 'Process-boundary proof' "${report}"
+          grep -q '| 0 | 1 | 0 | 0 |' "${report}"
+          grep -q '| 2 | 4096 |' "${report}"
+          if find "${proof_root}" -mindepth 1 -print -quit | grep -q .; then
+            echo "Cross-JVM proof left group artifacts behind." >&2
+            exit 1
+          fi
+          cat "${report}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Validate focused test discovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r suite; do
+            short="${suite##*.}"
+            report="$(find core -type f -path '*/test-reports/*' -name "*${short}*.xml" -print -quit)"
+            if [[ -z "${report}" ]]; then
+              echo "Focused Core suite ${short} produced no test report." >&2
+              exit 1
+            fi
+          done < "${RUNNER_TEMP}/expected-core-suites.txt"
+
+      - name: Upload Core focused diagnostics and evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shuffle-recovery-phase0-core-${{ github.run_id }}
+          if-no-files-found: error
+          path: |
+            core/target/shuffle-recovery-phase0/core-test-compile.log
+            core/target/shuffle-recovery-phase0/reference-provider/**
+            **/target/test-reports/*ReferenceShuffleProviderSuite*.xml
+            **/target/test-reports/*ShuffleRecoveryManifestSuite*.xml
+            **/target/test-reports/*ShuffleRecoveryComputationIdentitySuite*.xml
+            **/target/test-reports/*IndexShuffleBlockResolverSuite*.xml
+            **/target/test-reports/*SortShuffleManagerSuite*.xml
+            **/target/test-reports/*DAGSchedulerSuite*.xml
+            **/target/test-reports/*MapOutputTrackerSuite*.xml
+
+  opportunity-analyzer:
+    name: Focused opportunity analysis (SQL, JDK 17)
+    needs: preflight
+    if: needs.preflight.outputs.run_opportunity == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      OPPORTUNITY_CORPUS_MODE: >-
+        ${{ needs.preflight.outputs.run_evidence_opportunity == 'true' && 'evidence' || 'smoke' }}
+      OPPORTUNITY_DIR: ${{ github.workspace }}/sql/core/target/shuffle-recovery-phase0/opportunity
+
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+
+      - name: Install Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: 17
+
+      - name: Cache SBT and Maven launchers
+        uses: actions/cache@v5
+        with:
+          path: |
+            build/apache-maven-*
+            build/*.jar
+            ~/.sbt
+          key: shuffle-recovery-build-${{ runner.os }}-${{ hashFiles('**/pom.xml', 'project/build.properties', 'build/mvn', 'build/sbt', 'build/sbt-launch-lib.bash', 'build/spark-build-info') }}
+          restore-keys: |
+            shuffle-recovery-build-${{ runner.os }}-
+            build-${{ runner.os }}-
+
+      - name: Cache Coursier repository
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/coursier
+          key: shuffle-recovery-coursier-${{ runner.os }}-17-${{ hashFiles('**/pom.xml', '**/plugins.sbt') }}
+          restore-keys: |
+            shuffle-recovery-coursier-${{ runner.os }}-17-
+            coursier-${{ runner.os }}-17-
+            coursier-${{ runner.os }}-
 
       - name: Compile SQL production and test code
         shell: bash
         run: |
-          set -o pipefail
-          ./build/sbt -Phadoop-3 -Phive "sql/Test/compile" 2>&1 | \
-            tee "${RUNNER_TEMP}/shuffle-recovery-source-sql-compile.log"
+          set -uo pipefail
+          diagnostic_dir="${GITHUB_WORKSPACE}/sql/core/target/shuffle-recovery-phase0"
+          mkdir -p "${diagnostic_dir}"
+          compile_log="${diagnostic_dir}/sql-test-compile.log"
+          set +e
+          ./build/sbt -Phadoop-3 -Phive "sql/Test/compile" 2>&1 | tee "${compile_log}"
+          compile_status=${PIPESTATUS[0]}
+          set -e
+          if [[ ${compile_status} -ne 0 ]]; then
+            {
+              echo "### sql/Test/compile diagnostics"
+              echo '```text'
+              if ! grep -E '^\[error\]' "${compile_log}" | tail -n 200; then
+                tail -n 200 "${compile_log}"
+              fi
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          exit "${compile_status}"
 
-      - name: Upload SQL compile diagnostics
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: shuffle-recovery-source-sql-compile-${{ github.run_id }}
-          path: ${{ runner.temp }}/shuffle-recovery-source-sql-compile.log
-          if-no-files-found: error
-
-      - name: Run source-token and resolved-value regressions
+      - name: Run focused opportunity, source-identity and accounting suites in one SBT session
+        env:
+          SPARK_SHUFFLE_RECOVERY_OPPORTUNITY_OUTPUT: >-
+            ${{ github.workspace }}/sql/core/target/shuffle-recovery-phase0/analyzer-records.jsonl
         run: |
           ./build/sbt -Phadoop-3 -Phive \
-            "sql/testOnly org.apache.spark.sql.execution.exchange.ShuffleRecoverySourceReadIdentitySuite"
+            "sql/testOnly org.apache.spark.sql.execution.exchange.ShuffleRecoverySourceReadIdentitySuite org.apache.spark.sql.execution.exchange.ShuffleRecoveryComputationIdentityBuilderSuite org.apache.spark.sql.execution.exchange.ShuffleRecoveryOpportunityAnalyzerSuite org.apache.spark.sql.execution.exchange.ShuffleRecoveryOpportunityStudySuite org.apache.spark.sql.execution.exchange.ShuffleRecoveryRuntimeWeightsSuite org.apache.spark.sql.execution.exchange.ShuffleRecoveryRuntimeCorrelationSuite org.apache.spark.sql.execution.exchange.ShuffleRecoveryFailureDistributionSuite org.apache.spark.sql.execution.exchange.ShuffleRecoveryAdaptivePartitionRulesSuite org.apache.spark.sql.util.ExecutionListenerManagerSuite"
 
       - name: Prove source token is stable across independent JVMs
         shell: bash
@@ -152,123 +512,372 @@ jobs:
           test -s "${second}"
           cmp "${first}" "${second}"
 
-      - name: Validate focused SQL test discovery
-        shell: bash
-        run: |
-          set -euo pipefail
-          report="$(find sql -type f -path '*/test-reports/*' \
-            -name '*ShuffleRecoverySourceReadIdentitySuite*.xml' -print -quit)"
-          test -n "${report}"
-
-  core-identity:
-    name: Canonical identity codec and cross-JVM proof (Core, JDK 17)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout requested head
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Install Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: zulu
-          java-version: 17
-
-      - name: Cache build dependencies
-        uses: actions/cache@v5
-        with:
-          path: |
-            build/apache-maven-*
-            build/*.jar
-            ~/.sbt
-            ~/.cache/coursier
-          key: shuffle-recovery-experimental-core-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties', 'build/sbt') }}
-          restore-keys: |
-            shuffle-recovery-experimental-core-${{ runner.os }}-
-            shuffle-recovery-build-${{ runner.os }}-
-
-      - name: Compile Core production and test code
-        run: ./build/sbt -Phadoop-3 "core/Test/compile"
-
-      - name: Run identity codec, golden-vector, mutation and collision tests
-        run: |
-          ./build/sbt -Phadoop-3 \
-            "core/testOnly org.apache.spark.shuffle.ShuffleRecoveryComputationIdentitySuite"
-
-      - name: Prove canonical bytes are stable across independent JVMs
-        shell: bash
-        run: |
-          set -euo pipefail
-          vector="${RUNNER_TEMP}/shuffle-recovery-computation-identity.bin"
-          rm -f "${vector}"
-          ./build/sbt -Phadoop-3 \
-            "project core" \
-            "set Test / run / fork := true" \
-            "Test/runMain org.apache.spark.shuffle.ShuffleRecoveryComputationIdentityProcess write ${vector}"
-          ./build/sbt -Phadoop-3 \
-            "project core" \
-            "set Test / run / fork := true" \
-            "Test/runMain org.apache.spark.shuffle.ShuffleRecoveryComputationIdentityProcess compare ${vector}"
-          test -s "${vector}"
-
-      - name: Validate focused Core test discovery
-        shell: bash
-        run: |
-          set -euo pipefail
-          report="$(find core -type f -path '*/test-reports/*' \
-            -name '*ShuffleRecoveryComputationIdentitySuite*.xml' -print -quit)"
-          test -n "${report}"
-
-  canonical-sql-identity:
-    name: SQL materialization-boundary identity policy (JDK 17)
-    runs-on: ubuntu-latest
-    timeout-minutes: 75
-    steps:
-      - name: Checkout requested head
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Install Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: zulu
-          java-version: 17
-
-      - name: Cache build dependencies
-        uses: actions/cache@v5
-        with:
-          path: |
-            build/apache-maven-*
-            build/*.jar
-            ~/.sbt
-            ~/.cache/coursier
-          key: shuffle-recovery-experimental-sql-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties', 'build/sbt') }}
-          restore-keys: |
-            shuffle-recovery-experimental-sql-${{ runner.os }}-
-            shuffle-recovery-build-${{ runner.os }}-
-
-      - name: Compile SQL production and test code
-        run: ./build/sbt -Phadoop-3 -Phive "sql/Test/compile"
-
-      - name: Run identity boundary and eligibility regressions
+      - name: Run AQE-on/off TPC opportunity corpus
+        env:
+          SPARK_SHUFFLE_RECOVERY_CORPUS_MODE: ${{ env.OPPORTUNITY_CORPUS_MODE }}
+          SPARK_SHUFFLE_RECOVERY_OPPORTUNITY_DIR: ${{ env.OPPORTUNITY_DIR }}
         run: |
           ./build/sbt -Phadoop-3 -Phive \
-            "sql/testOnly org.apache.spark.sql.execution.exchange.ShuffleRecoveryComputationIdentityBuilderSuite org.apache.spark.sql.execution.exchange.ShuffleRecoveryOpportunityAnalyzerSuite"
+            "sql/testOnly org.apache.spark.sql.execution.exchange.ShuffleRecoveryOpportunityCorpusSuite"
 
-      - name: Validate focused SQL test discovery
+      - name: Validate focused test discovery and evidence accounting
         shell: bash
         run: |
           set -euo pipefail
           for suite in \
+            ShuffleRecoverySourceReadIdentitySuite \
             ShuffleRecoveryComputationIdentityBuilderSuite \
-            ShuffleRecoveryOpportunityAnalyzerSuite; do
+            ShuffleRecoveryOpportunityAnalyzerSuite \
+            ShuffleRecoveryOpportunityStudySuite \
+            ShuffleRecoveryRuntimeWeightsSuite \
+            ShuffleRecoveryRuntimeCorrelationSuite \
+            ShuffleRecoveryFailureDistributionSuite \
+            ShuffleRecoveryOpportunityCorpusSuite \
+            ShuffleRecoveryAdaptivePartitionRulesSuite \
+            ExecutionListenerManagerSuite; do
             report="$(find sql -type f -path '*/test-reports/*' -name "*${suite}*.xml" -print -quit)"
-            test -n "${report}"
+            if [[ -z "${report}" ]]; then
+              echo "Focused suite ${suite} produced no test report." >&2
+              exit 1
+            fi
           done
+
+          analyzer_evidence="sql/core/target/shuffle-recovery-phase0/analyzer-records.jsonl"
+          if [[ ! -s "${analyzer_evidence}" ]]; then
+            echo "Opportunity analyzer produced no evidence records." >&2
+            exit 1
+          fi
+          grep -q '"executionId":"aqe-off"' "${analyzer_evidence}"
+          grep -q '"executionId":"aqe-on"' "${analyzer_evidence}"
+          grep -q '"exchangeOrdinal":' "${analyzer_evidence}"
+          grep -q '"lineageDeterminism":' "${analyzer_evidence}"
+          grep -q '"eligible":' "${analyzer_evidence}"
+
+          raw="${OPPORTUNITY_DIR}/opportunity-${OPPORTUNITY_CORPUS_MODE}.jsonl"
+          rendered="${OPPORTUNITY_DIR}/opportunity-${OPPORTUNITY_CORPUS_MODE}.md"
+          correlation="${OPPORTUNITY_DIR}/correlation-${OPPORTUNITY_CORPUS_MODE}.md"
+          reconciliation="${OPPORTUNITY_DIR}/reconciliation-${OPPORTUNITY_CORPUS_MODE}.tsv"
+          sensitivity="${OPPORTUNITY_DIR}/sensitivity-${OPPORTUNITY_CORPUS_MODE}.md"
+          for evidence_file in \
+            "${raw}" \
+            "${rendered}" \
+            "${correlation}" \
+            "${reconciliation}" \
+            "${sensitivity}"; do
+            if [[ ! -s "${evidence_file}" ]]; then
+              echo "Expected evidence file ${evidence_file} is empty or missing." >&2
+              exit 1
+            fi
+          done
+
+          grep -q '"schemaVersion":1' "${raw}"
+          grep -q '"disposition":"WEIGHTED"' "${raw}"
+          grep -q 'Gate result:' "${rendered}"
+          grep -q 'Scope curve and correlation coverage' "${rendered}"
+          grep -q 'Failure-point opportunity' "${rendered}"
+          grep -q 'Unweighted / excluded accounting' "${rendered}"
+          grep -q 'TPC-DS' "${rendered}"
+          grep -q 'TPC-H' "${rendered}"
+          grep -q 'Frozen minimum completed-task-time coverage: 95.0%' "${correlation}"
+          grep -q $'executionId\texchangeOrdinal\texchangePath' "${reconciliation}"
+          grep -q 'Physical exchanges are not IID samples' "${sensitivity}"
+
+          if [[ "${OPPORTUNITY_CORPUS_MODE}" == "smoke" ]]; then
+            grep -q 'spark-in-tree-tpc-smoke-v2' "${rendered}"
+          else
+            grep -q 'spark-in-tree-tpc-evidence-v2' "${rendered}"
+            synthetic_raw="${OPPORTUNITY_DIR}/opportunity-synthetic-evidence.jsonl"
+            synthetic_report="${OPPORTUNITY_DIR}/opportunity-synthetic-evidence.md"
+            synthetic_correlation="${OPPORTUNITY_DIR}/correlation-synthetic-evidence.md"
+            synthetic_reconciliation="${OPPORTUNITY_DIR}/reconciliation-synthetic-evidence.tsv"
+            synthetic_sensitivity="${OPPORTUNITY_DIR}/sensitivity-synthetic-evidence.md"
+            for evidence_file in \
+              "${synthetic_raw}" \
+              "${synthetic_report}" \
+              "${synthetic_correlation}" \
+              "${synthetic_reconciliation}" \
+              "${synthetic_sensitivity}"; do
+              if [[ ! -s "${evidence_file}" ]]; then
+                echo "Expected synthetic evidence file ${evidence_file} is empty or missing." >&2
+                exit 1
+              fi
+            done
+            grep -q 'spark-controlled-synthetic-evidence-v1' "${synthetic_report}"
+            grep -q 'Frozen minimum completed-task-time coverage: 95.0%' \
+              "${synthetic_correlation}"
+            if grep -q '| SYNTHETIC |' "${rendered}"; then
+              echo "Synthetic evidence leaked into the benchmark headline report." >&2
+              exit 1
+            fi
+          fi
+
+          {
+            echo "### Phase 0-A weighted opportunity evidence"
+            echo "Corpus mode: \`${OPPORTUNITY_CORPUS_MODE}\`"
+            echo
+            cat "${correlation}"
+            echo
+            cat "${rendered}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload Phase 0-A evidence and focused test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shuffle-recovery-phase0-opportunity-${{ env.OPPORTUNITY_CORPUS_MODE }}-${{ github.run_id }}
+          if-no-files-found: error
+          path: |
+            sql/core/target/shuffle-recovery-phase0/sql-test-compile.log
+            sql/core/target/shuffle-recovery-phase0/analyzer-records.jsonl
+            sql/core/target/shuffle-recovery-phase0/opportunity/**
+            **/target/test-reports/*ShuffleRecoverySourceReadIdentitySuite*.xml
+            **/target/test-reports/*ShuffleRecoveryComputationIdentityBuilderSuite*.xml
+            **/target/test-reports/*ShuffleRecoveryOpportunityAnalyzerSuite*.xml
+            **/target/test-reports/*ShuffleRecoveryOpportunityStudySuite*.xml
+            **/target/test-reports/*ShuffleRecoveryRuntimeWeightsSuite*.xml
+            **/target/test-reports/*ShuffleRecoveryRuntimeCorrelationSuite*.xml
+            **/target/test-reports/*ShuffleRecoveryFailureDistributionSuite*.xml
+            **/target/test-reports/*ShuffleRecoveryOpportunityCorpusSuite*.xml
+            **/target/test-reports/*ShuffleRecoveryAdaptivePartitionRulesSuite*.xml
+            **/target/test-reports/*ExecutionListenerManagerSuite*.xml
+            **/target/*.log
+
+  cold-process:
+    name: Cold-process driver replacement proof (SQL, JDK 17)
+    needs: preflight
+    if: needs.preflight.outputs.run_cold_process == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      COLD_EVIDENCE_BASE: ${{ github.workspace }}/sql/core/target/shuffle-recovery-phase0/cold-process
+
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+
+      - name: Detect integrated cold-process suite
+        id: cold-suite
+        shell: bash
+        env:
+          COLD_CHANGED: ${{ needs.preflight.outputs.cold_process }}
+        run: |
+          set -euo pipefail
+          suite="sql/core/src/test/scala/org/apache/spark/shuffle/ShuffleRecoveryColdProcessSuite.scala"
+          if [[ -f "${suite}" ]]; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+          elif [[ "${COLD_CHANGED}" == "true" ]]; then
+            echo "Cold-process paths changed but the required suite is absent." >&2
+            exit 1
+          else
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+            echo "Cold-process suite is not yet integrated at this candidate head; lane is not applicable."
+          fi
+
+      - name: Install Java 17
+        if: steps.cold-suite.outputs.present == 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: 17
+
+      - name: Cache SBT and Maven launchers
+        if: steps.cold-suite.outputs.present == 'true'
+        uses: actions/cache@v5
+        with:
+          path: |
+            build/apache-maven-*
+            build/*.jar
+            ~/.sbt
+          key: shuffle-recovery-build-${{ runner.os }}-${{ hashFiles('**/pom.xml', 'project/build.properties', 'build/mvn', 'build/sbt', 'build/sbt-launch-lib.bash', 'build/spark-build-info') }}
+          restore-keys: |
+            shuffle-recovery-build-${{ runner.os }}-
+            build-${{ runner.os }}-
+
+      - name: Cache Coursier repository
+        if: steps.cold-suite.outputs.present == 'true'
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/coursier
+          key: shuffle-recovery-coursier-${{ runner.os }}-17-${{ hashFiles('**/pom.xml', '**/plugins.sbt') }}
+          restore-keys: |
+            shuffle-recovery-coursier-${{ runner.os }}-17-
+            coursier-${{ runner.os }}-17-
+            coursier-${{ runner.os }}-
+
+      - name: Compile SQL production and test code for cold-process proof
+        if: steps.cold-suite.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -uo pipefail
+          diagnostic_dir="${GITHUB_WORKSPACE}/sql/core/target/shuffle-recovery-phase0"
+          mkdir -p "${diagnostic_dir}"
+          compile_log="${diagnostic_dir}/cold-process-compile.log"
+          set +e
+          ./build/sbt -Phadoop-3 -Phive "sql/Test/compile" 2>&1 | tee "${compile_log}"
+          compile_status=${PIPESTATUS[0]}
+          set -e
+          if [[ ${compile_status} -ne 0 ]]; then
+            {
+              echo "### cold-process sql/Test/compile diagnostics"
+              echo '```text'
+              if ! grep -E '^\[error\]' "${compile_log}" | tail -n 200; then
+                tail -n 200 "${compile_log}"
+              fi
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          exit "${compile_status}"
+
+      - name: Run independent-JVM cold-process correctness matrix
+        if: steps.cold-suite.outputs.present == 'true'
+        shell: bash
+        env:
+          EVIDENCE_REPEAT: ${{ needs.preflight.outputs.run_evidence_cold_process }}
+        run: |
+          set -euo pipefail
+          rm -rf "${COLD_EVIDENCE_BASE}"
+          mkdir -p "${COLD_EVIDENCE_BASE}"
+          cleanup() {
+            pkill -f 'org.apache.spark.shuffle.ShuffleRecoveryColdProcessProcess' || true
+            find "${RUNNER_TEMP}" -maxdepth 1 \
+              -name 'shuffle-recovery-cold-work-*' -exec rm -rf {} + || true
+          }
+          trap cleanup EXIT
+
+          runs=1
+          [[ "${EVIDENCE_REPEAT}" == "true" ]] && runs=2
+          for iteration in $(seq 1 "${runs}"); do
+            run_dir="${COLD_EVIDENCE_BASE}/run-${iteration}"
+            mkdir -p "${run_dir}"
+            SPARK_SHUFFLE_RECOVERY_COLD_PROCESS_EVIDENCE_DIR="${run_dir}" \
+              timeout --signal=TERM --kill-after=30s 45m \
+              ./build/sbt -Phadoop-3 -Phive \
+                "project sql" \
+                "set Test / fork := true" \
+                "testOnly org.apache.spark.shuffle.ShuffleRecoveryColdProcessSuite"
+
+            evidence="${run_dir}/cold-process-evidence.tsv"
+            test -s "${evidence}"
+            grep -q $'role\tscenario\tcontrol\tsparkBaseline' "${evidence}"
+            grep -q $'replacement\tsparse\tnone' "${evidence}"
+            grep -q $'replacement\tempty\tnone' "${evidence}"
+            grep -q $'replacement\tlarge\tnone' "${evidence}"
+            grep -q $'replacement\twide\tnone' "${evidence}"
+            for control in \
+              disabled \
+              group-diff \
+              generation-not-later \
+              source-token \
+              provider-compat \
+              manifest-absent \
+              digest-collision \
+              artifact-missing \
+              claim-unavailable \
+              reservation-stale; do
+              grep -q $'replacement\tnegative\t'"${control}" "${evidence}"
+            done
+            cleanup
+          done
+
+      - name: Validate cold-process test discovery
+        if: steps.cold-suite.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$(find sql -type f -path '*/test-reports/*' \
+            -name '*ShuffleRecoveryColdProcessSuite*.xml' -print -quit)"
+          if [[ -z "${report}" ]]; then
+            echo "Cold-process suite produced no test report." >&2
+            exit 1
+          fi
+          {
+            echo "### Phase 0-B cold-process evidence"
+            echo
+            for evidence in "${COLD_EVIDENCE_BASE}"/run-*/cold-process-evidence.tsv; do
+              [[ -s "${evidence}" ]] || continue
+              echo "#### $(basename "$(dirname "${evidence}")")"
+              echo '```text'
+              cat "${evidence}"
+              echo '```'
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload cold-process evidence and child logs
+        if: always() && steps.cold-suite.outputs.present == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: shuffle-recovery-phase0-cold-process-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            sql/core/target/shuffle-recovery-phase0/cold-process-compile.log
+            sql/core/target/shuffle-recovery-phase0/cold-process/**
+            **/target/test-reports/*ShuffleRecoveryColdProcessSuite*.xml
+
+  exact-head-gate:
+    name: Confirm explicit gate is still exact-head
+    needs:
+      - preflight
+      - style
+      - core-recovery
+      - opportunity-analyzer
+      - cold-process
+    if: >-
+      always() && github.event_name == 'workflow_dispatch' &&
+      (needs.preflight.outputs.validation_mode == 'full' ||
+       needs.preflight.outputs.validation_mode == 'evidence')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Require every applicable validation lane to succeed
+        shell: bash
+        env:
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          STYLE_RESULT: ${{ needs.style.result }}
+          CORE_RESULT: ${{ needs.core-recovery.result }}
+          OPPORTUNITY_RESULT: ${{ needs.opportunity-analyzer.result }}
+          COLD_RESULT: ${{ needs.cold-process.result }}
+        run: |
+          set -euo pipefail
+          [[ "${PREFLIGHT_RESULT}" == "success" ]] || exit 1
+          for result in "${STYLE_RESULT}" "${CORE_RESULT}" "${OPPORTUNITY_RESULT}" "${COLD_RESULT}"; do
+            case "${result}" in
+              success|skipped) ;;
+              *)
+                echo "An applicable validation lane ended as ${result}." >&2
+                exit 1
+                ;;
+            esac
+          done
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+
+      - name: Reject a stale full/evidence candidate
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin \
+            "${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
+          current="$(git rev-parse "refs/remotes/origin/${GITHUB_REF_NAME}")"
+          if [[ "${current}" != "${CANDIDATE_SHA}" ]]; then
+            echo "Gate candidate ${CANDIDATE_SHA} is stale; branch now points to ${current}." >&2
+            exit 1
+          fi
+          {
+            echo "### Exact-head gate"
+            echo
+            echo "Validation mode: \`${{ needs.preflight.outputs.validation_mode }}\`"
+            echo "Validated candidate: \`${CANDIDATE_SHA}\`"
+            echo "Current branch head: \`${current}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
