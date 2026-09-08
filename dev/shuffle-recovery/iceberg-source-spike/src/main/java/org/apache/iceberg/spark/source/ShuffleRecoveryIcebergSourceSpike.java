@@ -282,7 +282,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
   private static Dataset<Row> pinnedProjection(SparkSession spark, long snapshotId) {
     return spark.read()
         .format("iceberg")
-        .option("snapshot-id", Long.toString(snapshotId))
+        .option("versionAsOf", Long.toString(snapshotId))
         .load(TABLE_NAME)
         .select("id", "payload");
   }
