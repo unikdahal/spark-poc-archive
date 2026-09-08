@@ -651,7 +651,12 @@ object ShuffleRecoveryColdProcessProcess {
     val mapStatuses = status.mapStatuses.clone()
     require(mapStatuses.length == exchange.numMappers)
     require(mapStatuses.forall(_ != null), "producer shuffle is not completely materialized")
+    if (sys.env.get("SPARK_SHUFFLE_RECOVERY_TEST_MASTER").exists(_.startsWith("local-cluster"))) {
+      require(mapStatuses.forall(_.location.executorId != "driver"),
+        "remote-executor proof must publish output produced outside the driver JVM")
+    }
     val resolver = SparkEnv.get.blockingShuffleManager.shuffleBlockResolver
+    val blockManager = SparkEnv.get.blockManager
     val artifacts = Vector.newBuilder[ShuffleRecoveryMapArtifact]
     val reducerTotals = Array.fill[Long](exchange.numPartitions)(0L)
     var emptyBlocks = 0L
@@ -665,9 +670,17 @@ object ShuffleRecoveryColdProcessProcess {
       val writer = provider.createMapOutputWriter(mapStatus.mapId, exchange.numPartitions)
       var reduceId = 0
       while (reduceId < exchange.numPartitions) {
-        val buffer = resolver.getBlockData(
-          ShuffleBlockId(exchange.shuffleId, mapStatus.mapId, reduceId),
-          None)
+        val block = ShuffleBlockId(exchange.shuffleId, mapStatus.mapId, reduceId)
+        val location = mapStatus.location
+        val buffer = if (location == blockManager.blockManagerId) {
+          resolver.getBlockData(block, None)
+        } else {
+          // Copy the scheduler-accepted winner through Spark's authenticated block transport.
+          // This is bounded to the small remote-executor feasibility scenarios, not a production
+          // publication policy or a scalable driver-proxy reader.
+          blockManager.blockTransferService.fetchBlockSync(
+            location.host, location.port, location.executorId, block.name, null)
+        }
         val size = buffer.size()
         try {
           if (size > 0L) {
@@ -865,12 +878,14 @@ object ShuffleRecoveryColdProcessProcess {
   }
 
   private def createSpark(root: Path, name: String): SparkSession = {
-    val local = root.resolve(s"spark-local-$name")
-    val warehouse = root.resolve(s"warehouse-$name")
+    val attemptRoot = sys.env.get("SPARK_SHUFFLE_RECOVERY_TEST_LOCAL_ROOT")
+      .map(Paths.get(_)).getOrElse(root)
+    val local = attemptRoot.resolve(s"spark-local-$name")
+    val warehouse = attemptRoot.resolve(s"warehouse-$name")
     Files.createDirectories(local)
     Files.createDirectories(warehouse)
     SparkSession.builder()
-      .master("local[2]")
+      .master(sys.env.getOrElse("SPARK_SHUFFLE_RECOVERY_TEST_MASTER", "local[2]"))
       .appName(s"shuffle-recovery-cold-$name")
       .config("spark.ui.enabled", "false")
       .config("spark.ui.showConsoleProgress", "false")
@@ -880,6 +895,8 @@ object ShuffleRecoveryColdProcessProcess {
       .config("spark.driver.bindAddress", "127.0.0.1")
       .config("spark.driver.port", "0")
       .config("spark.blockManager.port", "0")
+      .config("spark.executor.memory", "512m")
+      .config("spark.executor.cores", "1")
       .config("spark.local.dir", local.toString)
       .config("spark.sql.warehouse.dir", warehouse.toUri.toString)
       .getOrCreate()

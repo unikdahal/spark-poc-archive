@@ -288,6 +288,7 @@ jobs:
           ATTEMPT: ${{ needs.preflight.outputs.attempt }}
           SCHEDULER: ${{ needs.preflight.outputs.scheduler }}
           HARNESS: ${{ needs.preflight.outputs.harness }}
+          SHARED_FILESYSTEM_PROOF: 'true'
           EVIDENCE_DIR: ${{ runner.temp }}/shuffle-recovery-sql
         run: bash .github/scripts/shuffle-recovery-ci-module.sh sql
       - name: Export SQL status

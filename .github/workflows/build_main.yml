@@ -29,9 +29,10 @@ jobs:
     permissions:
       packages: write
     name: Run
-    # Skip pushes to `master` on forks: the "Sync fork" button mirrors
-    # apache/spark and would otherwise re-run the full build on every sync.
+    # The owned PoC branch has its own exact-candidate correctness and source gates.
+    # Keep the unrelated full Spark matrix available on normal branches and upstream.
     if: >-
       github.repository == 'apache/spark'
-      || github.ref != 'refs/heads/master'
+      || (github.ref != 'refs/heads/master'
+          && github.ref != 'refs/heads/spip/poc-owned-end-to-end')
     uses: ./.github/workflows/build_and_test.yml

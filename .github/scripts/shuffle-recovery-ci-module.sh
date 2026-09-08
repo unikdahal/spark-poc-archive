@@ -238,6 +238,14 @@ if [[ "${compile}" == success && "${tests}" == success ]]; then
   fi
 fi
 
+if [[ "${module}" == sql && "${SHARED_FILESYSTEM_PROOF:-false}" == true &&
+      "${compile}" == success && "${tests}" == success && "${proof}" == success ]]; then
+  proof=failed
+  EVIDENCE_DIR="${EVIDENCE_DIR}/shared-filesystem" \
+    bash dev/shuffle-recovery/shared-filesystem/run.sh
+  proof=success
+fi
+
 write_status
 bash .github/scripts/shuffle-recovery-ci-evidence.sh checksum-tree "${EVIDENCE_DIR}"
 finalized=true

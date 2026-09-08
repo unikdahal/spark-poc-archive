@@ -26,13 +26,14 @@ import java.nio.file.Path;
 import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
-import java.util.Set;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 import org.apache.iceberg.ContentFile;
@@ -49,7 +50,14 @@ import org.apache.iceberg.SnapshotScan;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.events.ScanEvent;
+import org.apache.iceberg.expressions.And;
+import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.ExpressionParser;
+import org.apache.iceberg.expressions.NamedReference;
+import org.apache.iceberg.expressions.Not;
+import org.apache.iceberg.expressions.Or;
+import org.apache.iceberg.expressions.UnboundPredicate;
+import org.apache.iceberg.types.Types;
 import org.apache.iceberg.spark.Spark3Util;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -135,6 +143,8 @@ public final class ShuffleRecoveryIcebergSourceSpike {
   }
 
   private static void runEvidence(SparkSession spark, List<String> evidence) throws Exception {
+    verifyDigestBudget();
+    evidence.add("digest_all_bytes_bounded\tPASS");
     spark.sql("CREATE NAMESPACE IF NOT EXISTS " + CATALOG + ".db");
     spark.sql(
         "CREATE TABLE "
@@ -185,7 +195,9 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     require(
         pinnedSnapshot1Certificate.sameIdentity(latestAtSnapshot1),
         "explicit snapshot 1 did not reproduce the original resolved scan identity");
-    require(checkedRows(pinnedSnapshot1, 0L, 256L) == 256L, "pinned snapshot 1 ordinary result changed");
+    require(
+        checkedRows(pinnedSnapshot1, 0L, 256L) == 256L,
+        "pinned snapshot 1 ordinary result changed");
 
     Dataset<Row> filtered = latestProjection(spark).where("id >= 128");
     Certificate filteredCertificate = requireCertified(certify(filtered));
@@ -215,17 +227,22 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     Dataset<Row> sameProjectionAfterEvolution = latestProjection(spark);
     Certificate sameProjectionAfterEvolutionCertificate =
         requireCertified(certify(sameProjectionAfterEvolution));
+    boolean sameCertificateAfterEvolution =
+        sameProjectionAfterEvolutionCertificate.sameIdentity(latestAtSnapshot2);
+    evidence.add("schema_evolution_certificate\t"
+        + (sameCertificateAfterEvolution ? "STABLE" : "CONSERVATIVE_MISS"));
     require(
-        sameProjectionAfterEvolutionCertificate.sameIdentity(latestAtSnapshot2),
-        "irrelevant schema addition changed the certified projected scan");
-    require(checkedRows(sameProjectionAfterEvolution, 0L, 512L) == 512L, "schema addition changed old projection");
+        checkedRows(sameProjectionAfterEvolution, 0L, 512L) == 512L,
+        "schema addition changed old projection");
 
     Dataset<Row> evolvedProjection = spark.table(TABLE_NAME).select("id", "payload", "note");
     Certificate evolvedProjectionCertificate = requireCertified(certify(evolvedProjection));
     require(
         !evolvedProjectionCertificate.sameIdentity(latestAtSnapshot2),
         "projecting an evolved field did not change source identity");
-    require(checkedRows(evolvedProjection, 0L, 512L) == 512L, "schema evolution changed ordinary row count");
+    require(
+        checkedRows(evolvedProjection, 0L, 512L) == 512L,
+        "schema evolution changed ordinary row count");
 
     spark.sql(
         "CREATE TABLE "
@@ -233,10 +250,13 @@ public final class ShuffleRecoveryIcebergSourceSpike {
             + " (id BIGINT, bucket INT) USING iceberg PARTITIONED BY (bucket)");
     spark.sql(
         "INSERT INTO " + PARTITIONED_TABLE_NAME + " VALUES (1, 0), (2, 1), (3, 0), (4, 1)");
-    Dataset<Row> unsupportedPartitioned = spark.table(PARTITIONED_TABLE_NAME).select("id", "bucket");
+    Dataset<Row> unsupportedPartitioned =
+        spark.table(PARTITIONED_TABLE_NAME).select("id", "bucket");
     CertificationResult unsupportedResult = certify(unsupportedPartitioned);
     require(!unsupportedResult.isCertified(), "partitioned source unexpectedly became eligible");
-    require(rowCount(unsupportedPartitioned) == 4L, "unsupported source changed ordinary execution");
+    require(
+        rowCount(unsupportedPartitioned) == 4L,
+        "unsupported source changed ordinary execution");
 
     table.refresh();
     table.expireSnapshots().expireSnapshotId(snapshot1).commit();
@@ -270,7 +290,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     evidence.add("pinned_reproduced_identity\tPASS");
     evidence.add("pushed_filter_changed_identity\tPASS");
     evidence.add("split_option_changed_identity\tPASS");
-    evidence.add("irrelevant_schema_evolution_stable\tPASS");
+    evidence.add("schema_evolution_preserved_values\tPASS");
     evidence.add("projected_schema_evolution_missed\tPASS");
     evidence.add("unsupported_partitioned_scan_preserved_execution\tPASS");
     evidence.add("expired_snapshot_preserved_ordinary_error\tPASS");
@@ -332,6 +352,8 @@ public final class ShuffleRecoveryIcebergSourceSpike {
       }
 
       return buildCertificate(scan, icebergScan, event, taskGroups);
+    } catch (BoundExceededException e) {
+      return CertificationResult.unsupported(e.code);
     } finally {
       CAPTURED_SCAN_EVENTS.remove();
     }
@@ -356,7 +378,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
       if (!projectionJson.equals(expectedSchemaJson)) {
         return CertificationResult.unsupported("planning-projection-disagreement");
       }
-      String filterJson = ExpressionParser.toJson(event.filter());
+      String filterJson = boundedExpressionJson(event.filter());
       if (!boundedString(projectionJson) || !boundedString(filterJson)) {
         return CertificationResult.unsupported("scan-fact-bound");
       }
@@ -404,9 +426,81 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     if (schema == null) {
       throw new BoundExceededException("null-projected-schema");
     }
+    if (schema.columns().size() > 128) {
+      throw new BoundExceededException("projected-field-count");
+    }
+    int characters = 0;
+    for (Types.NestedField field : schema.columns()) {
+      if (!boundedString(field.name()) || !field.type().isPrimitiveType()
+          || field.initialDefaultLiteral() != null || field.writeDefaultLiteral() != null
+          || (field.doc() != null && !boundedString(field.doc()))) {
+        throw new BoundExceededException("unreviewed-projected-field");
+      }
+      characters += field.name().length() + (field.doc() == null ? 0 : field.doc().length());
+      if (characters > MAX_STRING_BYTES / 8) {
+        throw new BoundExceededException("projected-schema-character-budget");
+      }
+    }
     // SparkScanBuilder constructs projected schemas this way as well. Reconstructing from fields
     // removes an unrelated table schema-id while retaining field ids, names, nullability and types.
     return SchemaParser.toJson(new Schema(schema.columns()));
+  }
+
+  private static String boundedExpressionJson(Expression expression) {
+    ArrayDeque<Expression> pending = new ArrayDeque<>();
+    pending.push(Objects.requireNonNull(expression));
+    int nodes = 0;
+    int characters = 0;
+    while (!pending.isEmpty()) {
+      Expression current = pending.pop();
+      if (++nodes > 128) {
+        throw new BoundExceededException("filter-node-count");
+      }
+      if (current instanceof And) {
+        pending.push(((And) current).left());
+        pending.push(((And) current).right());
+      } else if (current instanceof Or) {
+        pending.push(((Or) current).left());
+        pending.push(((Or) current).right());
+      } else if (current instanceof Not) {
+        pending.push(((Not) current).child());
+      } else if (current.op() != Expression.Operation.TRUE
+          && current.op() != Expression.Operation.FALSE) {
+        if (!(current instanceof UnboundPredicate)) {
+          throw new BoundExceededException("unreviewed-filter-predicate");
+        }
+        UnboundPredicate<?> predicate = (UnboundPredicate<?>) current;
+        if (!(predicate.term() instanceof NamedReference)
+            || !boundedString(predicate.ref().name())) {
+          throw new BoundExceededException("unreviewed-filter-term");
+        }
+        characters += predicate.ref().name().length();
+        if (predicate.literals() != null) {
+          if (predicate.literals().size() > 128) {
+            throw new BoundExceededException("filter-literal-count");
+          }
+          for (org.apache.iceberg.expressions.Literal<?> literal : predicate.literals()) {
+            Object value = literal.value();
+            if (!(value instanceof Long || value instanceof Integer || value instanceof Boolean
+                || value instanceof String && boundedString((String) value))) {
+              throw new BoundExceededException("unreviewed-filter-literal");
+            }
+            characters += value instanceof String ? ((String) value).length() : 24;
+            if (characters > MAX_STRING_BYTES / 8) {
+              throw new BoundExceededException("filter-character-budget");
+            }
+          }
+        }
+      }
+      if (characters > MAX_STRING_BYTES / 8) {
+        throw new BoundExceededException("filter-character-budget");
+      }
+    }
+    String json = ExpressionParser.toJson(expression);
+    if (!boundedString(json)) {
+      throw new BoundExceededException("filter-encoded-size");
+    }
+    return json;
   }
 
   private static Decomposition hashTaskGroups(
@@ -459,7 +553,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
           writeContentFile(out, bounded, fileTask.file());
           out.writeLong(fileTask.start());
           out.writeLong(fileTask.length());
-          writeString(out, bounded, ExpressionParser.toJson(fileTask.residual()));
+          writeString(out, bounded, boundedExpressionJson(fileTask.residual()));
           out.writeInt(deletes.size());
           for (DeleteFile delete : deletes) {
             if (delete == null) {
@@ -613,8 +707,10 @@ public final class ShuffleRecoveryIcebergSourceSpike {
         if (selected == null) {
           selected = event;
         } else if (selected.snapshotId() != event.snapshotId()
-            || !projectedSchemaJson(selected.projection()).equals(projectedSchemaJson(event.projection()))
-            || !ExpressionParser.toJson(selected.filter()).equals(ExpressionParser.toJson(event.filter()))) {
+            || !projectedSchemaJson(selected.projection()).equals(
+                projectedSchemaJson(event.projection()))
+            || !boundedExpressionJson(selected.filter()).equals(
+                boundedExpressionJson(event.filter()))) {
           return null;
         }
       }
@@ -703,6 +799,20 @@ public final class ShuffleRecoveryIcebergSourceSpike {
       return MessageDigest.getInstance("SHA-256");
     } catch (NoSuchAlgorithmException e) {
       throw new IllegalStateException("SHA-256 is unavailable", e);
+    }
+  }
+
+  private static void verifyDigestBudget() throws IOException {
+    BoundedDigestOutputStream output = new BoundedDigestOutputStream(sha256(), 12L);
+    DataOutputStream data = new DataOutputStream(output);
+    data.writeLong(7L);
+    data.write(new byte[4]);
+    require(output.metadataBytes == 12L, "scalar and array bytes must share the budget");
+    try {
+      data.writeByte(0);
+      throw new AssertionError("digest exceeded its byte limit");
+    } catch (BoundExceededException expected) {
+      require("metadata-total-bound".equals(expected.code), "wrong budget refusal");
     }
   }
 
@@ -807,8 +917,13 @@ public final class ShuffleRecoveryIcebergSourceSpike {
 
   private static final class BoundedDigestOutputStream extends DigestOutputStream {
     private long metadataBytes;
+    private final long limit;
 
     BoundedDigestOutputStream(MessageDigest digest) {
+      this(digest, MAX_HASHED_METADATA_BYTES);
+    }
+
+    BoundedDigestOutputStream(MessageDigest digest, long limit) {
       super(
           new OutputStream() {
             @Override
@@ -818,6 +933,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
             public void write(byte[] bytes, int offset, int length) {}
           },
           digest);
+      this.limit = limit;
     }
 
     @Override
@@ -834,7 +950,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     }
 
     private void account(int bytes) {
-      if (bytes < 0 || metadataBytes > MAX_HASHED_METADATA_BYTES - bytes) {
+      if (bytes < 0 || metadataBytes > limit - bytes) {
         throw new BoundExceededException("metadata-total-bound");
       }
       metadataBytes += bytes;
