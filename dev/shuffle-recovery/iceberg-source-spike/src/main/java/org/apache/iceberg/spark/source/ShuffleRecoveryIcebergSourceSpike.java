@@ -350,7 +350,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
       }
 
       String projectionJson = projectedSchemaJson(event.projection());
-      String expectedSchemaJson = projectedSchemaJson(sparkScan.expectedSchema());
+      String expectedSchemaJson = projectedSchemaJson(sparkScan.projection());
       if (!projectionJson.equals(expectedSchemaJson)) {
         return CertificationResult.unsupported("planning-projection-disagreement");
       }
