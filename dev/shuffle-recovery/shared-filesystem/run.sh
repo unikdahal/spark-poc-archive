@@ -54,6 +54,9 @@ stat -f -c '%T' "${mount_root}" | grep -Fx nfs
 
 export SPARK_SHUFFLE_RECOVERY_TEST_MASTER='local-cluster[2,1,1024]'
 export SPARK_SHUFFLE_RECOVERY_TEST_LOCAL_ROOT="${local_root}"
+# LocalSparkCluster creates worker directories beneath java.io.tmpdir. Standalone executors
+# honor SPARK_LOCAL_DIRS before spark.local.dir; isolate both so the purge covers all scratch.
+export SPARK_LOCAL_DIRS="${local_root}/executor-local"
 proof_root="${mount_root}/proof"
 mkdir -p "${proof_root}"
 common="root=${proof_root} scenario=sparse group=shared-filesystem testedCommit=${CANDIDATE_SHA}"
@@ -61,9 +64,10 @@ entry='org.apache.spark.shuffle.ShuffleRecoveryColdProcessProcess'
 run_child() {
   local label="$1" mode="$2"
   shift 2
-  ./build/sbt -Phadoop-3 -Phive 'project sql' \
+  timeout --kill-after=30s 15m ./build/sbt -Phadoop-3 -Phive 'project sql' \
     'set Test / run / fork := true' \
     'set Test / javaOptions += "-Dspark.shuffle.useOldFetchProtocol=true"' \
+    'set Test / javaOptions += "-Djava.io.tmpdir=" + sys.env("SPARK_SHUFFLE_RECOVERY_TEST_LOCAL_ROOT")' \
     "Test/runMain ${entry} ${mode} ${common} processEvidence=${EVIDENCE_DIR}/${label}.process $*" \
     2>&1 | tee "${EVIDENCE_DIR}/${label}.log"
 }
