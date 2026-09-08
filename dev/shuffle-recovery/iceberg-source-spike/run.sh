@@ -21,32 +21,97 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "${repo_root}"
 
-readonly iceberg_version="1.11.0"
-readonly iceberg_artifact="iceberg-spark-runtime-4.0_2.13"
-readonly iceberg_jar_name="${iceberg_artifact}-${iceberg_version}.jar"
-readonly iceberg_url="https://repo.maven.apache.org/maven2/org/apache/iceberg/${iceberg_artifact}/${iceberg_version}/${iceberg_jar_name}"
+readonly iceberg_source_commit="e76d63584d7f83b102026749e1ae0f91813cb78e"
+readonly iceberg_artifact="iceberg-spark-runtime-4.2_2.13"
+readonly iceberg_build_task=":iceberg-spark:iceberg-spark-runtime-4.2_2.13:shadowJar"
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/shuffle-recovery-iceberg-source.XXXXXX")"
-trap 'rm -rf "${work_dir}"' EXIT
-
-export ICEBERG_VERSION="${iceberg_version}"
-export ICEBERG_RUNTIME_JAR="${work_dir}/${iceberg_jar_name}"
-
 evidence_path="${1:-${work_dir}/iceberg-source-evidence.tsv}"
 mkdir -p "$(dirname "${evidence_path}")"
+: > "${evidence_path}"
 
-curl --fail --location --retry 3 --retry-all-errors \
-  --output "${ICEBERG_RUNTIME_JAR}" "${iceberg_url}"
-sha512sum "${ICEBERG_RUNTIME_JAR}"
+stage="initialize"
+finalize() {
+  local rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    {
+      printf 'failure_stage\t%s\n' "${stage}"
+      printf 'runner_exit_code\t%s\n' "${rc}"
+      printf 'runner_result\tFAILED\n'
+    } >> "${evidence_path}"
+  fi
+  rm -rf "${work_dir}"
+  exit "${rc}"
+}
+trap finalize EXIT
 
+spark_candidate_commit="$(git rev-parse HEAD)"
+{
+  printf 'spark_candidate_commit\t%s\n' "${spark_candidate_commit}"
+  printf 'iceberg_source_commit\t%s\n' "${iceberg_source_commit}"
+  printf 'iceberg_runtime_artifact\t%s\n' "${iceberg_artifact}"
+  printf 'iceberg_build_task\t%s\n' "${iceberg_build_task}"
+} >> "${evidence_path}"
+
+stage="fetch-pinned-iceberg-source"
+iceberg_src="${work_dir}/iceberg"
+git init -q "${iceberg_src}"
+git -C "${iceberg_src}" remote add origin https://github.com/apache/iceberg.git
+git -C "${iceberg_src}" fetch --depth=1 origin "${iceberg_source_commit}"
+git -C "${iceberg_src}" checkout -q --detach FETCH_HEAD
+resolved_iceberg_commit="$(git -C "${iceberg_src}" rev-parse HEAD)"
+test "${resolved_iceberg_commit}" = "${iceberg_source_commit}"
+
+stage="build-pinned-iceberg-runtime"
+(
+  cd "${iceberg_src}"
+  ./gradlew --no-daemon -DsparkVersions=4.2 "${iceberg_build_task}"
+)
+
+mapfile -t runtime_jars < <(
+  find "${iceberg_src}/spark/v4.2/spark-runtime/build/libs" -maxdepth 1 -type f \
+    -name "${iceberg_artifact}-*.jar" \
+    ! -name '*-sources.jar' ! -name '*-javadoc.jar' | sort
+)
+if [[ ${#runtime_jars[@]} -ne 1 ]]; then
+  printf 'expected exactly one built Iceberg runtime jar, found %s\n' "${#runtime_jars[@]}" >&2
+  exit 1
+fi
+
+export ICEBERG_RUNTIME_JAR="${runtime_jars[0]}"
+export ICEBERG_VERSION="source:${iceberg_source_commit}:spark-4.2"
+iceberg_sha512="$(sha512sum "${ICEBERG_RUNTIME_JAR}" | awk '{print $1}')"
+{
+  printf 'iceberg_resolved_source_commit\t%s\n' "${resolved_iceberg_commit}"
+  printf 'iceberg_runtime_sha512\t%s\n' "${iceberg_sha512}"
+} >> "${evidence_path}"
+
+smoke_evidence="${work_dir}/compatibility-smoke.tsv"
+conformance_evidence="${work_dir}/resolved-scan-conformance.tsv"
+
+stage="compile-and-run-compatibility-smoke"
 ./build/sbt -Phadoop-3 -Phive \
   "project sql" \
   'set Test / unmanagedSourceDirectories += file(sys.props("user.dir")) / "dev/shuffle-recovery/iceberg-source-spike/src/main/java"' \
   'set Test / unmanagedJars += file(sys.env("ICEBERG_RUNTIME_JAR"))' \
   "Test / compile" \
-  "Test / runMain org.apache.iceberg.spark.source.ShuffleRecoveryIcebergSourceSpike ${evidence_path}"
+  "Test / runMain org.apache.iceberg.spark.source.ShuffleRecoveryIcebergCompatibilitySmoke ${smoke_evidence}"
 
-test -s "${evidence_path}"
-grep -F $'result\tPASS' "${evidence_path}"
-grep -F $'decision\tRESOLVED_SCAN_CERTIFICATION_FEASIBLE_WITH_PRIVATE_ICEBERG_HOOKS' "${evidence_path}"
+test -s "${smoke_evidence}"
+grep -F $'result\tPASS' "${smoke_evidence}"
+cat "${smoke_evidence}" >> "${evidence_path}"
+
+stage="run-resolved-scan-conformance"
+./build/sbt -Phadoop-3 -Phive \
+  "project sql" \
+  'set Test / unmanagedSourceDirectories += file(sys.props("user.dir")) / "dev/shuffle-recovery/iceberg-source-spike/src/main/java"' \
+  'set Test / unmanagedJars += file(sys.env("ICEBERG_RUNTIME_JAR"))' \
+  "Test / runMain org.apache.iceberg.spark.source.ShuffleRecoveryIcebergSourceSpike ${conformance_evidence}"
+
+test -s "${conformance_evidence}"
+grep -F $'result\tPASS' "${conformance_evidence}"
+grep -F $'decision\tRESOLVED_SCAN_CERTIFICATION_FEASIBLE_WITH_PRIVATE_ICEBERG_HOOKS' \
+  "${conformance_evidence}"
+cat "${conformance_evidence}" >> "${evidence_path}"
+printf 'runner_result\tPASS\n' >> "${evidence_path}"
 cat "${evidence_path}"
