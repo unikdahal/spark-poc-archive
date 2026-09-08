@@ -43,6 +43,14 @@ build task and a SHA-512 digest of the generated runtime jar. A newer Iceberg ma
 released artifact must not be substituted without changing the recorded candidate and rerunning the
 same gates.
 
+CI may reuse the source-built jar from an exact-key cache scoped to the runner OS, architecture,
+Zulu JDK 17 and runner-script hash (which includes the pinned source revision and build task).
+The runner still fetches and verifies the pinned revision, checks the cached source/task identity
+and SHA-512, and rebuilds if either check fails. Evidence records `source-build` or `verified-cache`
+as `iceberg_runtime_origin`. A cache hit skips only the external runtime build; smoke and conformance
+always execute against the current Spark candidate. This is build-cache provenance, not an
+independent attestation of the cached artifact.
+
 ## Compatibility smoke gate
 
 Before the larger conformance program runs,

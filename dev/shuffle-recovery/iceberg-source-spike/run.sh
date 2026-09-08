@@ -67,23 +67,40 @@ git -C "${iceberg_src}" checkout -q --detach FETCH_HEAD
 resolved_iceberg_commit="$(git -C "${iceberg_src}" rev-parse HEAD)"
 test "${resolved_iceberg_commit}" = "${iceberg_source_commit}"
 
-stage="build-pinned-iceberg-runtime"
-(
-  cd "${iceberg_src}"
-  ./gradlew --no-daemon -DsparkVersions=4.2 "${iceberg_build_task}"
-)
+runtime_cache="${ICEBERG_RUNTIME_CACHE:-${work_dir}/runtime-cache}"
+cache_identity="${iceberg_source_commit}:${iceberg_build_task}"
+stage="validate-runtime-cache"
+runtime_origin=source-build
+if [[ -f "${runtime_cache}/runtime.jar" && -f "${runtime_cache}/source.txt" && \
+      -f "${runtime_cache}/sha512.txt" ]] &&
+    [[ "$(cat "${runtime_cache}/source.txt")" == "${cache_identity}" ]] &&
+    [[ "$(sha512sum "${runtime_cache}/runtime.jar" | awk '{print $1}')" == \
+       "$(cat "${runtime_cache}/sha512.txt")" ]]; then
+  runtime_origin=verified-cache
+else
+  stage="build-pinned-iceberg-runtime"
+  (
+    cd "${iceberg_src}"
+    ./gradlew --no-daemon -DsparkVersions=4.2 "${iceberg_build_task}"
+  )
 
-mapfile -t runtime_jars < <(
-  find "${iceberg_src}/spark/v4.2/spark-runtime/build/libs" -maxdepth 1 -type f \
-    -name "${iceberg_artifact}-*.jar" \
-    ! -name '*-sources.jar' ! -name '*-javadoc.jar' | sort
-)
-if [[ ${#runtime_jars[@]} -ne 1 ]]; then
-  printf 'expected exactly one built Iceberg runtime jar, found %s\n' "${#runtime_jars[@]}" >&2
-  exit 1
+  mapfile -t runtime_jars < <(
+    find "${iceberg_src}/spark/v4.2/spark-runtime/build/libs" -maxdepth 1 -type f \
+      -name "${iceberg_artifact}-*.jar" \
+      ! -name '*-sources.jar' ! -name '*-javadoc.jar' | sort
+  )
+  if [[ ${#runtime_jars[@]} -ne 1 ]]; then
+    printf 'expected exactly one built Iceberg runtime jar, found %s\n' "${#runtime_jars[@]}" >&2
+    exit 1
+  fi
+  mkdir -p "${runtime_cache}"
+  cp "${runtime_jars[0]}" "${runtime_cache}/runtime.jar"
+  printf '%s\n' "${cache_identity}" > "${runtime_cache}/source.txt"
+  sha512sum "${runtime_cache}/runtime.jar" | awk '{print $1}' > "${runtime_cache}/sha512.txt"
 fi
 
-export ICEBERG_RUNTIME_JAR="${runtime_jars[0]}"
+export ICEBERG_RUNTIME_JAR="${runtime_cache}/runtime.jar"
+printf 'iceberg_runtime_origin\t%s\n' "${runtime_origin}" >> "${evidence_path}"
 export ICEBERG_VERSION="source:${iceberg_source_commit}:spark-4.2"
 iceberg_sha512="$(sha512sum "${ICEBERG_RUNTIME_JAR}" | awk '{print $1}')"
 {
