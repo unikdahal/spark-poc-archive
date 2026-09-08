@@ -351,3 +351,44 @@ jobs:
       - name: Enforce exact-candidate gate
         if: always()
         run: test '${{ steps.run.outcome }}' = success
+
+  provider-evidence:
+    name: Pinned Celeborn cold-driver provider evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout requested head
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: 17
+
+      - name: Verify pinned provider source contracts
+        shell: bash
+        run: bash docs/shuffle-recovery/experimental/celeborn-0.6.3/verify-pinned-provider-source.sh
+
+      - name: Run independent-process cold-driver provider probe
+        shell: bash
+        env:
+          CELEBORN_PROBE_WORK_DIR: ${{ runner.temp }}/celeborn-provider
+          CELEBORN_PROBE_RESULT: ${{ runner.temp }}/celeborn-provider-result.txt
+        run: bash docs/shuffle-recovery/experimental/celeborn-0.6.3/run-cold-driver-gap-probe.sh
+
+      - name: Upload provider evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: celeborn-0.6.3-provider-evidence-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/celeborn-provider-result.txt
+            ${{ runner.temp }}/celeborn-provider/producer.log
+            ${{ runner.temp }}/celeborn-provider/reader.log
+            ${{ runner.temp }}/celeborn-provider/apache-celeborn-0.6.3-bin/logs
+          if-no-files-found: warn
