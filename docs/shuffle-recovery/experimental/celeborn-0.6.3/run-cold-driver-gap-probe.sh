@@ -151,8 +151,22 @@ if ! wait_for_service_log "${CELEBORN_HOME}/logs" 'Register worker successfully|
   fail "worker did not become ready"
 fi
 
-classpath="$(find "${CELEBORN_HOME}" -type f -name '*.jar' -print | paste -sd: -)"
-[[ -n "${classpath}" ]] || fail "no Celeborn jars found in binary distribution"
+# The release contains mutually incompatible unshaded service jars and shaded engine-client jars.
+# Use exactly one client artifact first, then only non-Celeborn runtime dependencies. Putting every
+# distribution jar on one classpath can mix shaded LifecycleManager bytecode with unshaded protocol
+# messages and fail JVM verification before the provider behavior under test is reached.
+client_jar="${CELEBORN_HOME}/spark/celeborn-client-spark-3-shaded_2.12-${CELEBORN_VERSION}.jar"
+[[ -f "${client_jar}" ]] || fail "expected pinned Spark 3 / Scala 2.12 Celeborn client jar was not found"
+runtime_jars=("${client_jar}")
+while IFS= read -r jar; do
+  case "$(basename "${jar}")" in
+    celeborn-*.jar) continue ;;
+  esac
+  runtime_jars+=("${jar}")
+done < <(find "${CELEBORN_HOME}/jars" -maxdepth 1 -type f -name '*.jar' -print | sort)
+((${#runtime_jars[@]} > 1)) || fail "no non-Celeborn runtime dependency jars found"
+classpath="$(IFS=:; printf '%s' "${runtime_jars[*]}")"
+log "probeClientJar=$(basename "${client_jar}")"
 mkdir -p "${WORK}/classes"
 javac -cp "${classpath}" -d "${WORK}/classes" "${ROOT}/ColdDriverProviderProbe.java"
 probe_classpath="${WORK}/classes:${classpath}"
