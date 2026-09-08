@@ -124,34 +124,10 @@
     ],
     "offsetRounding": "nearest integer millisecond, ties to even",
     "failurePoints": [
-      {
-        "id": "F0",
-        "weight": 0.25,
-        "name": "pre-producer-elapsed",
-        "offsetFormula": "0.5 * P, where P is median(target producer completion elapsed ms)",
-        "intent": "represent an early failure that can occur before any reusable producer output exists"
-      },
-      {
-        "id": "F1",
-        "weight": 0.30,
-        "name": "producer-boundary-elapsed",
-        "offsetFormula": "P",
-        "intent": "sample the producer/publication race without waiting for publication"
-      },
-      {
-        "id": "F2",
-        "weight": 0.30,
-        "name": "post-producer-middle-elapsed",
-        "offsetFormula": "P + 0.50 * (Q - P), where Q is median(correct result verification elapsed ms)",
-        "intent": "sample the middle of the independently observed ordinary post-producer tail"
-      },
-      {
-        "id": "F3",
-        "weight": 0.15,
-        "name": "post-producer-late-elapsed",
-        "offsetFormula": "P + 0.85 * (Q - P)",
-        "intent": "sample a late ordinary elapsed point while remaining strictly before the calibration median result boundary"
-      }
+      {"id": "F0", "weight": 0.25, "name": "pre-producer-elapsed", "offsetFormula": "0.5 * P, where P is median(target producer completion elapsed ms)", "intent": "represent an early failure that can occur before any reusable producer output exists"},
+      {"id": "F1", "weight": 0.30, "name": "producer-boundary-elapsed", "offsetFormula": "P", "intent": "sample the producer/publication race without waiting for publication"},
+      {"id": "F2", "weight": 0.30, "name": "post-producer-middle-elapsed", "offsetFormula": "P + 0.50 * (Q - P), where Q is median(correct result verification elapsed ms)", "intent": "sample the middle of the independently observed ordinary post-producer tail"},
+      {"id": "F3", "weight": 0.15, "name": "post-producer-late-elapsed", "offsetFormula": "P + 0.85 * (Q - P)", "intent": "sample a late ordinary elapsed point while remaining strictly before the calibration median result boundary"}
     ],
     "freezeValidityRules": [
       "all five calibration runs for every workload/input-scale cell expose producer completion and correct-result verification",
@@ -265,43 +241,9 @@
     "iidUnit": "paired repetition within a fixed cell; never physical exchange, map, reducer, or block"
   },
   "overheadExperiments": [
-    {
-      "id": "OH_DISABLED",
-      "comparison": "recovery-disabled integrated candidate vs frozen upstream baseline on the same no-failure backend",
-      "gateUpper95Max": 0.01,
-      "cellDimensions": ["cohort id", "input scale"],
-      "registeredCellCount": 24,
-      "pairedRepetitionsPerCell": 12,
-      "pairCount": 288,
-      "timedAttemptCount": 576,
-      "randomizationSeed": 557101,
-      "bootstrapSeed": 55101
-    },
-    {
-      "id": "OH_ALL_MISS",
-      "comparison": "recovery-enabled integrated candidate with naturally absent/incompatible candidates vs the same integrated candidate with recovery disabled",
-      "gateUpper95Max": 0.05,
-      "cellDimensions": ["cohort id", "input scale"],
-      "registeredCellCount": 24,
-      "pairedRepetitionsPerCell": 12,
-      "pairCount": 288,
-      "timedAttemptCount": 576,
-      "randomizationSeed": 557102,
-      "bootstrapSeed": 55102
-    },
-    {
-      "id": "OH_PUBLICATION",
-      "comparison": "recovery-enabled integrated candidate with publication enabled and no injected failure vs the same integrated candidate with recovery disabled",
-      "publicationOutcomePolicy": "retain every publication-arm timed outcome, including successful, late, failed, or state-unknown publication; publication outcome never determines pair inclusion or replacement",
-      "gateUpper95Max": 0.05,
-      "cellDimensions": ["cohort id", "input scale"],
-      "registeredCellCount": 24,
-      "pairedRepetitionsPerCell": 12,
-      "pairCount": 288,
-      "timedAttemptCount": 576,
-      "randomizationSeed": 557103,
-      "bootstrapSeed": 55103
-    }
+    {"id": "OH_DISABLED", "comparison": "recovery-disabled integrated candidate vs frozen upstream baseline on the same no-failure backend", "gateUpper95Max": 0.01, "cellDimensions": ["cohort id", "input scale"], "registeredCellCount": 24, "pairedRepetitionsPerCell": 12, "pairCount": 288, "timedAttemptCount": 576, "randomizationSeed": 557101, "bootstrapSeed": 55101},
+    {"id": "OH_ALL_MISS", "comparison": "recovery-enabled integrated candidate with naturally absent/incompatible candidates vs the same integrated candidate with recovery disabled", "gateUpper95Max": 0.05, "cellDimensions": ["cohort id", "input scale"], "registeredCellCount": 24, "pairedRepetitionsPerCell": 12, "pairCount": 288, "timedAttemptCount": 576, "randomizationSeed": 557102, "bootstrapSeed": 55102},
+    {"id": "OH_PUBLICATION", "comparison": "recovery-enabled integrated candidate with publication enabled and no injected failure vs the same integrated candidate with recovery disabled", "publicationOutcomePolicy": "retain every publication-arm timed outcome, including successful, late, failed, or state-unknown publication; publication outcome never determines pair inclusion or replacement", "gateUpper95Max": 0.05, "cellDimensions": ["cohort id", "input scale"], "registeredCellCount": 24, "pairedRepetitionsPerCell": 12, "pairCount": 288, "timedAttemptCount": 576, "randomizationSeed": 557103, "bootstrapSeed": 55103}
   ],
   "overheadPolicy": {
     "failureInjection": false,
@@ -312,6 +254,9 @@
     "cacheWarmth": "same natural-backend-warmth policy as primary campaign",
     "outlierDeletion": "none",
     "hardTimeoutSeconds": 1800,
+    "nonHarnessTimeoutOrFailure": "the affected overhead comparison is INDETERMINATE; retain the raw pair and do not replace it",
+    "wrongResult": "the campaign cannot PASS; retain the raw pair and correctness evidence",
+    "harnessFaultReplacement": "only a predeclared external harness fault may be replaced, the invalid raw record remains published, and the replacement receives a new attempt id",
     "metric": "weighted_sum(treatment no-failure runtime ms) / weighted_sum(reference no-failure runtime ms) - 1",
     "weights": "fixed workload weight * fixed 0.25 input-scale weight",
     "confidence": "comparison-specific paired stratified bootstrap over 12 pairs within each workload/input-scale cell with fixed scenario composition",
@@ -335,13 +280,7 @@
   },
   "costModel": {
     "unit": "scenario USD",
-    "rates": {
-      "vCpuHour": 0.04,
-      "memoryGiBHour": 0.005,
-      "durableStorageGiBHour": 0.00004,
-      "incrementalProviderReadGiB": 0.01,
-      "incrementalProviderWriteGiB": 0.01
-    },
+    "rates": {"vCpuHour": 0.04, "memoryGiBHour": 0.005, "durableStorageGiBHour": 0.00004, "incrementalProviderReadGiB": 0.01, "incrementalProviderWriteGiB": 0.01},
     "publicationAccounting": "charge only bytes and service work introduced by recovery publication; ordinary shuffle writes are reported separately and are not double-counted",
     "failureProbabilityUse": "the registered 1.0% query-attempt driver-failure rate is applied to the full frozen failure-opportunity distribution, including pre-producer and zero-impact completed-before-injection outcomes; no survivor-only probability is substituted",
     "greenfield": {
