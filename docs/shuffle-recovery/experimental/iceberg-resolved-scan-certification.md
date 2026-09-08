@@ -96,28 +96,26 @@ The decomposition stream covers data-file identity and physical split facts, tas
 facts and ordering. File locations contribute only to the digest and are not printed into CI evidence.
 No dense mapper-by-reducer state is constructed by this source-certification spike.
 
-## Explicitly narrowed claims for outstanding coverage
+## Coverage and resource limits
 
-This compatibility repair does **not** close the independent source-certification follow-ups around
-resource/value coverage. Until those cases are separately demonstrated, Gate A must interpret the
-positive result narrowly:
+The owned candidate requires exact IDs and payloads for every positive snapshot, filter, split and
+schema-evolution case, including uniqueness and complete expected membership. Projecting the added
+nullable field also checks its null values. Unprojected schema evolution may retain the certificate
+or conservatively miss; exact ordinary values are required in either case.
 
-- the conformance fixture exercises only scans whose planned file tasks have no attached delete
-  files; existing descriptor-encoding code is not evidence that position deletes, equality deletes
-  or deletion vectors are a certified read mode;
-- the existing larger conformance program proves snapshot/identity relationships and ordinary row
-  cardinality, while the compatibility smoke proves one exact value read; it does not yet constitute
-  complete multiset/value coverage for every mutation/evolution case;
-- the 64 MiB decomposition constant must not be described as a bound on all source-planning or
-  certification allocations. Source planning, schema/filter JSON materialization and the final
-  identity have separate costs/limits. The current bound is only part of the feasibility guardrail,
-  not a complete production memory contract; and
-- deployment-specific authorization has not been exercised. A missing-table error demonstrates only
-  that ordinary source-resolution errors are not converted into recovery hits.
+Delete-bearing tasks are explicitly refused. A merge-on-read deletion of one row must exercise that
+specific refusal, after which ordinary execution must return the exact remaining rows. Position
+deletes, equality deletes and deletion vectors are not certified reuse modes.
 
-Accordingly, no delete-bearing scan, complete resource-boundary contract, or deployment authorization
-mode is claimed supported by this document. Those limitations remain safe because this spike is
-out-of-tree evidence and is not wired into scheduler adoption or recovery eligibility.
+The decomposition digest limits every scalar and array write to 64 MiB. Schema and expression
+serialization have separate field, node, literal and string limits applied before JSON encoding;
+nested schemas, non-null defaults and unreviewed filter terms/literals are refused. These limits
+bound additional certificate work, not Iceberg's own scan planning allocations or total JVM memory.
+
+Deployment-specific authorization has not been exercised. Missing-table and expired-snapshot checks
+establish preservation of those ordinary errors only. The adapter remains an out-of-tree experiment
+and is not yet connected to scheduler adoption. Each case above is a required assertion, not a claim
+that a candidate has passed before its exact-commit CI evidence is available.
 
 ## Ordinary query semantics
 
@@ -145,8 +143,8 @@ artifacts, and it performs no recovery I/O on the DAGScheduler event loop.
 | Pushed filter | Identity input | Iceberg expression encoding includes literals. |
 | Per-file residual | Decomposition input | Residual is included in ordered task hashing. |
 | Split planning | Conformance case | Effective split controls and task ordering affect identity/decomposition. |
-| Delete-bearing file tasks | **Not claimed supported** | No real attached-delete read/value case is executed by this experiment. |
-| Complete row multiset/value parity for every case | **Not yet claimed** | Current broad cases include cardinality checks; only the smoke gate asserts exact values. |
+| Delete-bearing file tasks | Unsupported | A real row-delete case requires explicit refusal and correct ordinary values. |
+| Positive-case value parity | Required assertion | Exact IDs, payloads, uniqueness and evolved null fields are checked. |
 | Complete 64 MiB certification allocation bound | **Not claimed** | Source planning/JSON materialization are outside that narrow stream guardrail. |
 | Partitioned/grouped scans | Unsupported | Partition/group-key canonicalization is unreviewed. |
 | Runtime-filter-dependent scans | Unsupported | Runtime filters can re-plan Iceberg tasks. |
@@ -167,8 +165,9 @@ smoke gate and larger conformance run. The larger run checks:
 6. a changed split option changes identity and mapper decomposition;
 7. schema evolution is compared at the projected-field boundary;
 8. an unsupported partitioned scan produces no certificate but still executes normally;
-9. an expired explicit snapshot preserves its ordinary source failure; and
-10. a missing source preserves ordinary source resolution failure.
+9. an expired explicit snapshot preserves its ordinary source failure;
+10. a missing source preserves ordinary source resolution failure; and
+11. a real delete-bearing scan refuses certification and preserves exact ordinary values.
 
 The runner creates its evidence file before fetching/building Iceberg. Any failed stage appends
 `failure_stage`, `runner_exit_code` and `runner_result\tFAILED`, so an early linkage/build failure
