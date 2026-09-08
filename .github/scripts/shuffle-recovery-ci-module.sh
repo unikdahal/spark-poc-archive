@@ -36,7 +36,38 @@ if [[ "${actual}" != "${CANDIDATE_SHA}" ]]; then
   exit 1
 fi
 
+if [[ "${EVIDENCE_DIR}" == "/" ]]; then
+  echo "refusing to use filesystem root as evidence directory" >&2
+  exit 2
+fi
+rm -rf "${EVIDENCE_DIR}"
 mkdir -p "${EVIDENCE_DIR}/reports"
+compile=not-started
+tests=not-started
+proof=not-started
+process_evidence=not-required
+finalized=false
+
+write_status() {
+  {
+    echo "compilation=${compile}"
+    echo "tests=${tests}"
+    echo "proof=${proof}"
+    echo "process_evidence=${process_evidence}"
+  } > "${EVIDENCE_DIR}/status.env"
+}
+
+finalize_on_exit() {
+  local status=$?
+  trap - EXIT
+  if [[ "${finalized}" != true ]]; then
+    write_status
+    bash .github/scripts/shuffle-recovery-ci-evidence.sh checksum-tree "${EVIDENCE_DIR}" || true
+  fi
+  exit "${status}"
+}
+trap finalize_on_exit EXIT
+
 {
   echo "candidate_kind=experimental-tree"
   echo "candidate_sha=${actual}"
@@ -44,12 +75,25 @@ mkdir -p "${EVIDENCE_DIR}/reports"
   echo "validation_mode=${VALIDATION_MODE}"
   echo "workflow_run_id=${GITHUB_RUN_ID:-local}"
 } > "${EVIDENCE_DIR}/provenance.env"
+: > "${EVIDENCE_DIR}/commands.txt"
 {
   java -version
   sed 's/^/build_property=/' project/build.properties
   echo "root_pom_sha256=$(sha256sum pom.xml | awk '{print $1}')"
 } > "${EVIDENCE_DIR}/dependencies.txt" 2>&1
-: > "${EVIDENCE_DIR}/commands.txt"
+
+export SPARK_SHUFFLE_RECOVERY_TESTED_COMMIT="${CANDIDATE_SHA}"
+cold_evidence_dir="${EVIDENCE_DIR}/cold-process"
+if [[ "${module}" == sql && "${HARNESS}" == true ]]; then
+  process_evidence=pending
+  rm -rf "${cold_evidence_dir}"
+  mkdir -p "${cold_evidence_dir}"
+  export SPARK_SHUFFLE_RECOVERY_COLD_PROCESS_EVIDENCE_DIR="${cold_evidence_dir}"
+  {
+    echo "SPARK_SHUFFLE_RECOVERY_TESTED_COMMIT=${CANDIDATE_SHA}"
+    echo "SPARK_SHUFFLE_RECOVERY_COLD_PROCESS_EVIDENCE_DIR=${cold_evidence_dir}"
+  } >> "${EVIDENCE_DIR}/commands.txt"
+fi
 
 bash .github/scripts/shuffle-recovery-ci-suites.sh "${module}" \
   "${IDENTITY_SOURCE}" "${PROVIDER}" "${ATTEMPT}" "${SCHEDULER}" "${HARNESS}" > \
@@ -84,6 +128,12 @@ set -e
 [[ ${compile_status} -ne 0 ]] || compile=success
 
 if [[ "${compile}" == success ]]; then
+  # Test reports are evidence for this invocation only. Delete any reports left by earlier local
+  # runs before the command and require every selected report to be newer than this marker.
+  echo "remove prior ${source_root} test reports before selected-suite execution" >> "${EVIDENCE_DIR}/commands.txt"
+  find "${source_root}" -type f -path '*/test-reports/*.xml' -delete 2>/dev/null || true
+  test_start="${EVIDENCE_DIR}/test-start.marker"
+  : > "${test_start}"
   test_command="${module}/testOnly"
   while IFS= read -r suite; do test_command+=" ${suite}"; done < "${EVIDENCE_DIR}/suites.txt"
   printf './build/sbt %s "%s"\n' "${profile[*]}" "${test_command}" >> "${EVIDENCE_DIR}/commands.txt"
@@ -94,13 +144,47 @@ if [[ "${compile}" == success ]]; then
   report_status=0
   while IFS= read -r suite; do
     short="${suite##*.}"
+    exact="TEST-${suite}.xml"
+    mapfile -d '' candidates < <(
+      find "${source_root}" -type f -path '*/test-reports/*' -name "${exact}" -print0 \
+        2>/dev/null | sort -z)
+    if [[ ${#candidates[@]} -eq 1 ]]; then
+      cp "${candidates[0]}" "${EVIDENCE_DIR}/reports/${short}.xml"
+    elif [[ ${#candidates[@]} -gt 1 ]]; then
+      index=0
+      for candidate_report in "${candidates[@]}"; do
+        cp "${candidate_report}" "${EVIDENCE_DIR}/reports/${short}.candidate-${index}.xml"
+        index=$((index + 1))
+      done
+    fi
     report="$(bash .github/scripts/shuffle-recovery-ci-evidence.sh \
-      require-report "${source_root}" "${suite}" 2>>"${EVIDENCE_DIR}/missing-reports.log")" || {
+      locate-report "${source_root}" "${suite}" "${test_start}" \
+      2>>"${EVIDENCE_DIR}/missing-reports.log")" || {
         report_status=1
         continue
       }
-    cp "${report}" "${EVIDENCE_DIR}/reports/${short}.xml"
+    echo "validate exact fresh report for ${suite}" >> "${EVIDENCE_DIR}/commands.txt"
+    bash .github/scripts/shuffle-recovery-ci-evidence.sh validate-report \
+      "${report}" "${suite}" > "${EVIDENCE_DIR}/reports/${short}.summary" \
+      2> "${EVIDENCE_DIR}/reports/${short}.validation.log" || report_status=1
   done < "${EVIDENCE_DIR}/suites.txt"
+
+  if [[ "${module}" == sql && "${HARNESS}" == true ]]; then
+    echo "validate cold/healing process evidence for ${CANDIDATE_SHA}" >> "${EVIDENCE_DIR}/commands.txt"
+    set +e
+    bash .github/scripts/shuffle-recovery-ci-evidence.sh validate-cold-process \
+      "${cold_evidence_dir}" "${CANDIDATE_SHA}" > \
+      "${EVIDENCE_DIR}/cold-process-validation.txt" 2>&1
+    cold_status=$?
+    set -e
+    if [[ ${cold_status} -eq 0 ]]; then
+      process_evidence=success
+    else
+      process_evidence=failed
+      report_status=1
+    fi
+  fi
+
   if [[ ${test_status} -eq 0 && ${report_status} -eq 0 ]]; then tests=success; else tests=failed; fi
 fi
 
@@ -154,10 +238,7 @@ if [[ "${compile}" == success && "${tests}" == success ]]; then
   fi
 fi
 
-{
-  echo "compilation=${compile}"
-  echo "tests=${tests}"
-  echo "proof=${proof}"
-} > "${EVIDENCE_DIR}/status.env"
+write_status
 bash .github/scripts/shuffle-recovery-ci-evidence.sh checksum-tree "${EVIDENCE_DIR}"
+finalized=true
 [[ "${compile}" == success && "${tests}" == success && "${proof}" == success ]]
