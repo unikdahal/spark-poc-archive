@@ -127,6 +127,15 @@ object ShuffleRecoveryColdProcessProcess {
     val evidencePath = Paths.get(required(options, "evidence"))
     Files.createDirectories(root)
     createParentDirectories(evidencePath)
+    options.get("processEvidence").foreach { value =>
+      val path = Paths.get(value)
+      createParentDirectories(path)
+      val process = ProcessHandle.current()
+      val master = sys.env.getOrElse("SPARK_SHUFFLE_RECOVERY_TEST_MASTER", "local[2]")
+      val evidence = s"testedCommit=$testedCommit\nmode=$mode\nmaster=$master\n" +
+        s"pid=${process.pid()}\nstarted=${process.info().startInstant().get()}\n"
+      Files.write(path, evidence.getBytes(StandardCharsets.UTF_8), StandardOpenOption.CREATE_NEW)
+    }
 
     mode match {
       case "baseline" =>
@@ -326,6 +335,11 @@ object ShuffleRecoveryColdProcessProcess {
     val producer = Evidence.read(producerPath)
     require(baseline("scenario") == scenarioValue.name)
     require(producer("scenario") == scenarioValue.name)
+    require(baseline("testedCommit") == testedCommit)
+    require(producer("testedCommit") == testedCommit)
+    require(baseline("role") == "baseline")
+    require(producer("role") == "producer")
+    require(baseline("group") == group && producer("group") == group)
     require(baseline("resultDigest") == producer("resultDigest"))
     require(baseline("rowCount") == producer("rowCount"))
 
@@ -675,7 +689,7 @@ object ShuffleRecoveryColdProcessProcess {
         val buffer = if (location == blockManager.blockManagerId) {
           resolver.getBlockData(block, None)
         } else {
-          // Copy the scheduler-accepted winner through Spark's authenticated block transport.
+          // Copy the scheduler-accepted winner through Spark's block transport.
           // This is bounded to the small remote-executor feasibility scenarios, not a production
           // publication policy or a scalable driver-proxy reader.
           blockManager.blockTransferService.fetchBlockSync(

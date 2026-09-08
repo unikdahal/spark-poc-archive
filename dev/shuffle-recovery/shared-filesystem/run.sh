@@ -59,38 +59,69 @@ mkdir -p "${proof_root}"
 common="root=${proof_root} scenario=sparse group=shared-filesystem testedCommit=${CANDIDATE_SHA}"
 entry='org.apache.spark.shuffle.ShuffleRecoveryColdProcessProcess'
 run_child() {
-  local mode="$1"
-  shift
+  local label="$1" mode="$2"
+  shift 2
   ./build/sbt -Phadoop-3 -Phive 'project sql' \
     'set Test / run / fork := true' \
     'set Test / javaOptions += "-Dspark.shuffle.useOldFetchProtocol=true"' \
-    "Test/runMain ${entry} ${mode} ${common} $*" 2>&1 | \
-    tee "${EVIDENCE_DIR}/${mode}.log"
+    "Test/runMain ${entry} ${mode} ${common} processEvidence=${EVIDENCE_DIR}/${label}.process $*" \
+    2>&1 | tee "${EVIDENCE_DIR}/${label}.log"
 }
-run_child baseline "evidence=${EVIDENCE_DIR}/baseline.tsv"
-run_child producer "evidence=${EVIDENCE_DIR}/producer.tsv"
+run_child baseline baseline "evidence=${EVIDENCE_DIR}/baseline.tsv"
+run_child producer producer "evidence=${EVIDENCE_DIR}/producer.tsv"
 # Only the mounted artifact namespace survives between producer and replacement.
 rm -rf "${local_root}"
 mkdir -p "${local_root}"
-run_child replacement "evidence=${EVIDENCE_DIR}/replacement.tsv" \
+run_child replacement replacement "evidence=${EVIDENCE_DIR}/replacement.tsv" \
   "baseline=${EVIDENCE_DIR}/baseline.tsv producer=${EVIDENCE_DIR}/producer.tsv"
+for control in source-token artifact-missing; do
+  rm -rf "${local_root}"
+  mkdir -p "${local_root}"
+  run_child "${control}" replacement "evidence=${EVIDENCE_DIR}/${control}.tsv" \
+    "baseline=${EVIDENCE_DIR}/baseline.tsv producer=${EVIDENCE_DIR}/producer.tsv control=${control}"
+done
 
 python3 - "${EVIDENCE_DIR}" "${CANDIDATE_SHA}" <<'CHECK'
 import csv
 import sys
 from pathlib import Path
 root = Path(sys.argv[1])
+candidate = sys.argv[2]
+processes = set()
 def record(name):
     with (root / (name + '.tsv')).open() as stream:
         rows = list(csv.DictReader(stream, delimiter='\t'))
     assert len(rows) == 1, name
-    return rows[0]
+    row = rows[0]
+    assert row['testedCommit'] == candidate, name
+    assert row['scenario'] == 'sparse' and row['group'] == 'shared-filesystem', name
+    process = dict(line.split('=', 1) for line in
+                   (root / (name + '.process')).read_text().splitlines())
+    assert process['testedCommit'] == candidate, name
+    assert process['master'] == 'local-cluster[2,1,1024]', name
+    assert process['mode'] == row['role'], name
+    identity = (process['pid'], process['started'])
+    assert identity not in processes, 'proof reused a child JVM'
+    processes.add(identity)
+    return row
 base, producer, replacement = [record(n) for n in ['baseline', 'producer', 'replacement']]
+assert [r['role'] for r in [base, producer, replacement]] == [
+    'baseline', 'producer', 'replacement']
+assert all(r['control'] == 'none' for r in [base, producer, replacement])
+assert int(base['mapTaskCount']) > 0 and int(producer['mapTaskCount']) > 0
 assert base['resultDigest'] == producer['resultDigest'] == replacement['resultDigest']
+assert base['rowCount'] == producer['rowCount'] == replacement['rowCount']
 assert replacement['adopted'] == 'true'
 assert replacement['mapTaskCount'] == '0'
 assert int(replacement['providerBytesRead']) > 0
 assert replacement['currentShuffleId'] != producer['originShuffleId']
+for control in ['source-token', 'artifact-missing']:
+    missed = record(control)
+    assert missed['role'] == 'replacement' and missed['control'] == control
+    assert missed['adopted'] == 'false' and int(missed['mapTaskCount']) > 0
+    assert missed['providerBlockReads'] == '0' and missed['providerBytesRead'] == '0'
+    assert missed['resultDigest'] == base['resultDigest']
+    assert missed['rowCount'] == base['rowCount']
 (root / 'decision.txt').write_text(
     'SHARED_FILESYSTEM_MECHANISM_PASS\n'
     'Not a production provider, security, scale, AQE or value gate.\n')

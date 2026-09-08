@@ -57,8 +57,8 @@ import org.apache.iceberg.expressions.NamedReference;
 import org.apache.iceberg.expressions.Not;
 import org.apache.iceberg.expressions.Or;
 import org.apache.iceberg.expressions.UnboundPredicate;
-import org.apache.iceberg.types.Types;
 import org.apache.iceberg.spark.Spark3Util;
+import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
@@ -121,6 +121,8 @@ public final class ShuffleRecoveryIcebergSourceSpike {
             .config("spark.ui.enabled", "false")
             .config("spark.sql.adaptive.enabled", "false")
             .config("spark.sql.shuffle.partitions", "4")
+            .config("spark.sql.extensions",
+                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
             .config("spark.sql.catalog." + CATALOG, "org.apache.iceberg.spark.SparkCatalog")
             .config("spark.sql.catalog." + CATALOG + ".type", "hadoop")
             .config("spark.sql.catalog." + CATALOG + ".warehouse", warehouse.toUri().toString())
@@ -134,11 +136,21 @@ public final class ShuffleRecoveryIcebergSourceSpike {
       runEvidence(spark, evidence);
       evidence.add("decision\tRESOLVED_SCAN_CERTIFICATION_FEASIBLE_WITH_PRIVATE_ICEBERG_HOOKS");
       evidence.add("result\tPASS");
-      Files.createDirectories(evidencePath.getParent());
-      Files.write(evidencePath, evidence, StandardCharsets.UTF_8);
+    } catch (Exception | AssertionError failure) {
+      evidence.add("result\tFAILED");
+      evidence.add("failure_class\t" + failure.getClass().getName());
+      throw failure;
     } finally {
-      spark.stop();
-      deleteRecursively(workspace);
+      try {
+        Files.createDirectories(evidencePath.getParent());
+        Files.write(evidencePath, evidence, StandardCharsets.UTF_8);
+      } finally {
+        try {
+          spark.stop();
+        } finally {
+          deleteRecursively(workspace);
+        }
+      }
     }
   }
 
@@ -276,6 +288,21 @@ public final class ShuffleRecoveryIcebergSourceSpike {
                         .format("iceberg")
                         .load(CATALOG + ".db.table_that_does_not_exist")));
     require(missingTableFailure != null, "missing table unexpectedly produced a certificate");
+
+    // Exercise an actual row-level delete: a metadata-only whole-file removal would not test
+    // the refusal of delete-bearing tasks. The exact refusal reason enforces that distinction.
+    spark.sql("ALTER TABLE " + TABLE_NAME
+        + " SET TBLPROPERTIES ('write.delete.mode'='merge-on-read')");
+    spark.sql("DELETE FROM " + TABLE_NAME + " WHERE id = 0");
+    Dataset<Row> deletedProjection = latestProjection(spark);
+    CertificationResult deletedResult = certify(deletedProjection);
+    require(!deletedResult.isCertified(), "delete-bearing source unexpectedly certified");
+    require("delete-bearing-scan-unreviewed".equals(deletedResult.unsupportedReason),
+        "row-level delete did not exercise delete-bearing tasks: "
+            + deletedResult.unsupportedReason);
+    require(checkedRows(deletedProjection, 1L, 512L) == 511L,
+        "refused delete-bearing scan changed ordinary row values");
+    evidence.add("delete_bearing_scan_refused_with_exact_values\tPASS");
 
     evidence.add("table_uuid\t" + latestAtSnapshot1.tableUuid);
     evidence.add("snapshot_1\t" + snapshot1);

@@ -35,12 +35,18 @@ unreviewed filter terms/literals. Its bounded digest counts scalar and array byt
 planning memory is separate from additional certificate work. The real source and durable shuffle
 experiment are not yet one automatically integrated replay query.
 
+The delete refusal is exercised with an actual merge-on-read row deletion. Certification must
+report a delete-bearing task; ordinary execution must return every remaining expected row with its
+correct payload. A metadata-only whole-file removal does not satisfy that check.
+
 ## Current evidence
 
 Candidate `a109e7c74882089dacf6fd9d02d19b7b15a8a2f1`, Actions run `34270239031`, passed
 routing, lint/license, Core, SQL and cold-process validation. Its Iceberg compatibility smoke passed,
 but source conformance failed on an unjustified unconditional schema-evolution identity assertion.
 The next candidate records stable identity or a conservative miss and still requires exact values.
+The downloaded SQL artifact validates 39 cold child records, including nine successful replacements
+and ten negative controls, plus three healing child records against that exact candidate.
 
 No performance, production authorization, AQE recovery or SPIP acceptance claim follows from these
 checks. Ordinary latest-source resolution and ordinary errors remain authoritative.
@@ -54,6 +60,8 @@ local checks are limited to source inspection, shell syntax and patch hygiene.
 The final candidate gate requires the source conformance job as well as Core/SQL and quality lanes.
 Core/SQL artifacts include exact suite reports and cold/healing child evidence. The shared-filesystem
 experiment records the mount, process logs, result digests, skipped maps and provider reads.
+It also requires distinct child process identities and matching commit provenance, and checks that
+a changed source token or missing provider index triggers recomputation with identical results.
 
 The next runtime work is to connect the certified actual SQL producer to publication and adoption,
 then replace dense status reconstruction with explicit provider-native reads and prove complete
