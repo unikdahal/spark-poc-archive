@@ -19,6 +19,7 @@ package org.apache.spark.sql.execution.exchange
 
 import java.nio.charset.StandardCharsets
 
+import org.apache.spark.SparkArithmeticException
 import org.apache.spark.shuffle.{
   ShuffleRecoveryCanonicalValue,
   ShuffleRecoveryComputationIdentity,
@@ -26,14 +27,37 @@ import org.apache.spark.shuffle.{
   ShuffleRecoveryMapperDecomposition,
   ShuffleRecoveryMapperSplit,
   ShuffleRecoverySourceToken}
-import org.apache.spark.sql.catalyst.expressions.{Alias, Ascending, Literal, Rand, SortOrder}
-import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, RangePartitioning}
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{
+  Alias,
+  Ascending,
+  EvalMode,
+  Expression,
+  Literal,
+  Murmur3Hash,
+  Not,
+  NumericEvalContext,
+  Pmod,
+  Rand,
+  SortOrder}
+import org.apache.spark.sql.catalyst.plans.physical.{
+  HashPartitioning,
+  RangePartitioning,
+  SinglePartition}
+import org.apache.spark.sql.catalyst.util.CollationFactory
 import org.apache.spark.sql.execution.{ProjectExec, RangeExec, SparkPlan}
 import org.apache.spark.sql.test.SharedSparkSession
-import org.apache.spark.sql.types.IntegerType
+import org.apache.spark.sql.types.{IntegerType, MetadataBuilder, StringType}
+import org.apache.spark.unsafe.types.UTF8String
 
 class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession {
   import ShuffleRecoveryMissReason._
+
+  private val DefaultCompressionBlockSize = 32 * 1024
+
+  private case class BuildOverrides(
+      encryptionEnabled: Boolean = false,
+      resolvedValues: Map[String, ShuffleRecoveryCanonicalValue] = Map.empty)
 
   test("equivalent independently planned shuffles produce byte-identical identities") {
     val firstPlan = filteredRangePlan()
@@ -79,7 +103,7 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
     assert(splitA.digest !== splitB.digest)
   }
 
-  test("ANSI and session timezone are mandatory semantic discriminators") {
+  test("ANSI, session timezone and reviewed runtime formats are identity discriminators") {
     val plan = projectedLiteralRange(7)
     val exchange = hashExchange(plan)
     val base = build(exchange, plan, ansi = false, timeZone = "UTC")
@@ -87,6 +111,41 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
     assert(base.digest !== build(exchange, plan, ansi = true, timeZone = "UTC").digest)
     assert(base.digest !==
       build(exchange, plan, ansi = false, timeZone = "America/Los_Angeles").digest)
+    assert(base.digest !== build(
+      exchange,
+      plan,
+      compressionBlockSize = 64 * 1024).digest)
+    assert(base.digest !== build(
+      exchange,
+      plan,
+      compressionEnabled = false).digest)
+
+    val uncompressedA = build(
+      exchange,
+      plan,
+      compressionEnabled = false,
+      compressionCodec = "lz4")
+    val uncompressedB = build(
+      exchange,
+      plan,
+      compressionEnabled = false,
+      compressionCodec = "inactive-codec")
+    assert(uncompressedA.canonicalPayload === uncompressedB.canonicalPayload)
+  }
+
+  test("unreviewed compression and encryption modes refuse identity construction") {
+    val plan = projectedLiteralRange(7)
+    val exchange = hashExchange(plan)
+
+    assert(buildResult(exchange, plan, compressionCodec = "zstd") ===
+      ShuffleRecoveryIdentityRejected(UnsupportedShuffleMode))
+    assert(buildResult(exchange, plan, compressionBlockSize = 32 * 1024 * 1024) ===
+      ShuffleRecoveryIdentityRejected(UnsupportedShuffleMode))
+    assert(buildResult(
+      exchange,
+      plan,
+      overrides = BuildOverrides(encryptionEnabled = true)) ===
+      ShuffleRecoveryIdentityRejected(UnsupportedShuffleMode))
   }
 
   test("resolved runtime values are ordered canonically and remain semantic") {
@@ -95,24 +154,146 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
     val first = build(
       exchange,
       plan,
-      resolvedValues = Map(
+      overrides = BuildOverrides(resolvedValues = Map(
         "z" -> ShuffleRecoveryIntValue(2),
-        "a" -> ShuffleRecoveryIntValue(1)))
+        "a" -> ShuffleRecoveryIntValue(1))))
     val second = build(
       exchange,
       plan,
-      resolvedValues = List(
+      overrides = BuildOverrides(resolvedValues = List(
         "a" -> ShuffleRecoveryIntValue(1),
-        "z" -> ShuffleRecoveryIntValue(2)).toMap)
+        "z" -> ShuffleRecoveryIntValue(2)).toMap))
     val mutated = build(
       exchange,
       plan,
-      resolvedValues = Map(
+      overrides = BuildOverrides(resolvedValues = Map(
         "a" -> ShuffleRecoveryIntValue(1),
-        "z" -> ShuffleRecoveryIntValue(3)))
+        "z" -> ShuffleRecoveryIntValue(3))))
 
     assert(first.canonicalPayload === second.canonicalPayload)
     assert(first.digest !== mutated.digest)
+  }
+
+  test("raw malformed UTF8 values cannot collapse to one accepted identity") {
+    val firstUtf8 = UTF8String.fromBytes(Array(0x80.toByte))
+    val secondUtf8 = UTF8String.fromBytes(Array(0x81.toByte))
+    assert(firstUtf8.toString === secondUtf8.toString)
+    assert(!firstUtf8.isValid)
+    assert(!secondUtf8.isValid)
+
+    val firstPlan = projectedUtf8(firstUtf8, StringType)
+    val secondPlan = projectedUtf8(secondUtf8, StringType)
+    assert(buildResult(singleExchange(firstPlan), firstPlan) ===
+      ShuffleRecoveryIdentityRejected(UnsupportedExpression))
+    assert(buildResult(singleExchange(secondPlan), secondPlan) ===
+      ShuffleRecoveryIdentityRejected(UnsupportedExpression))
+  }
+
+  test("valid UTF8 bytes remain stable and collation remains semantic") {
+    val text = new String(
+      Array(
+        0xcf.toByte,
+        0x80.toByte,
+        0x2d.toByte,
+        0xf0.toByte,
+        0x9f.toByte,
+        0x99.toByte,
+        0x82.toByte),
+      StandardCharsets.UTF_8)
+    val first = projectedUtf8(UTF8String.fromString(text), StringType)
+    val second = projectedUtf8(UTF8String.fromString(text), StringType)
+    assert(build(singleExchange(first), first).canonicalPayload ===
+      build(singleExchange(second), second).canonicalPayload)
+
+    val lcaseId = CollationFactory.collationNameToId("UTF8_LCASE")
+    val lcase = projectedUtf8(UTF8String.fromString(text), StringType(lcaseId))
+    assert(build(singleExchange(first), first).digest !==
+      build(singleExchange(lcase), lcase).digest)
+  }
+
+  test("accepted UTF8 literals defensively own backing bytes") {
+    val raw = "stable".getBytes(StandardCharsets.UTF_8)
+    val plan = projectedUtf8(UTF8String.fromBytes(raw), StringType)
+    val identity = build(singleExchange(plan), plan)
+
+    raw(0) = 'X'.toByte
+
+    val expected = projectedUtf8(UTF8String.fromString("stable"), StringType)
+    assert(identity.canonicalPayload === build(singleExchange(expected), expected).canonicalPayload)
+  }
+
+  test("oversized UTF8 literals refuse identity construction within the canonical bound") {
+    val oversized = UTF8String.fromBytes(Array.fill[Byte](16 * 1024 + 1)('a'.toByte))
+    val plan = projectedUtf8(oversized, StringType)
+
+    assert(buildResult(singleExchange(plan), plan) ===
+      ShuffleRecoveryIdentityRejected(UnsupportedExpression))
+  }
+
+  test("captured Pmod evaluation contexts are refused instead of inferred from session state") {
+    val legacy = Pmod(
+      Literal(7),
+      Literal(0),
+      NumericEvalContext(EvalMode.LEGACY, allowDecimalPrecisionLoss = false))
+    val ansi = Pmod(
+      Literal(7),
+      Literal(0),
+      NumericEvalContext(EvalMode.ANSI, allowDecimalPrecisionLoss = true))
+
+    assert(legacy.eval(InternalRow.empty) == null)
+    intercept[SparkArithmeticException] {
+      ansi.eval(InternalRow.empty)
+    }
+
+    val legacyPlan = projectedExpression(legacy)
+    val ansiPlan = projectedExpression(ansi)
+    assert(buildResult(hashExchange(legacyPlan), legacyPlan, ansi = false) ===
+      ShuffleRecoveryIdentityRejected(UnsupportedExpression))
+    assert(buildResult(hashExchange(ansiPlan), ansiPlan, ansi = false) ===
+      ShuffleRecoveryIdentityRejected(UnsupportedExpression))
+  }
+
+  test("direct Murmur3Hash is outside the closed expression allowlist") {
+    val child = rangePlan()
+    val hash = Murmur3Hash(Seq(child.output.head), 42)
+    val project = ProjectExec(Seq(Alias(hash, "hash")()), child)
+
+    assert(buildResult(hashExchange(project), project) ===
+      ShuffleRecoveryIdentityRejected(UnsupportedExpression))
+  }
+
+  test("non-empty output metadata is refused until semantic metadata keys are reviewed") {
+    val child = rangePlan()
+    val metadata = new MetadataBuilder().putString("semantic-key", "value").build()
+    val project = ProjectExec(
+      Seq(Alias(Literal(7), "value")(explicitMetadata = Some(metadata))),
+      child)
+
+    assert(buildResult(hashExchange(project), project) ===
+      ShuffleRecoveryIdentityRejected(DeterminismUnproven))
+  }
+
+  test("deep expression graphs refuse identity construction before codec materialization") {
+    val child = rangePlan()
+    val deep = (0 until 70).foldLeft[Expression](Literal(true)) { case (expression, _) =>
+      Not(expression)
+    }
+    val project = ProjectExec(Seq(Alias(deep, "deep")()), child)
+
+    assert(buildResult(hashExchange(project), project) ===
+      ShuffleRecoveryIdentityRejected(DeterminismUnproven))
+  }
+
+  test("wide intermediate outputs refuse before ordinal-map materialization") {
+    val child = rangePlan()
+    val wide = ProjectExec(
+      (0 until 4097).map(index => Alias(Literal(index), s"value_$index")()),
+      child)
+    val hash = Murmur3Hash(Seq(wide.output.head), 42)
+    val outer = ProjectExec(Seq(Alias(hash, "hash")()), wide)
+
+    assert(buildResult(singleExchange(outer), outer) ===
+      ShuffleRecoveryIdentityRejected(DeterminismUnproven))
   }
 
   test("missing source identity fails closed") {
@@ -122,7 +303,7 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
       Nil,
       decomposition(),
       Map.empty,
-      ShuffleRecoveryIdentitySemanticConfig(ansiEnabled = false, "UTC"))
+      semanticConfig())
 
     assert(ShuffleRecoveryComputationIdentityBuilder.build(exchange, inputs) ===
       ShuffleRecoveryIdentityRejected(SourceTokenUnavailable))
@@ -172,18 +353,27 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
   private def filteredRangePlan(): SparkPlan =
     spark.range(0, 32, 1, 4).where("id > 7").queryExecution.executedPlan
 
-  private def projectedLiteralRange(value: Int): SparkPlan = {
+  private def projectedLiteralRange(value: Int): SparkPlan =
+    projectedExpression(Literal(value))
+
+  private def projectedNullRange(): SparkPlan =
+    projectedExpression(Literal.create(null, IntegerType))
+
+  private def projectedExpression(expression: Expression): SparkPlan = {
     val child = rangePlan()
-    ProjectExec(Seq(Alias(Literal(value), "value")()), child)
+    ProjectExec(Seq(Alias(expression, "value")()), child)
   }
 
-  private def projectedNullRange(): SparkPlan = {
+  private def projectedUtf8(value: UTF8String, dataType: StringType): SparkPlan = {
     val child = rangePlan()
-    ProjectExec(Seq(Alias(Literal.create(null, IntegerType), "value")()), child)
+    ProjectExec(Seq(Alias(Literal.create(value, dataType), "value")()), child)
   }
 
   private def hashExchange(child: SparkPlan, partitions: Int = 2): ShuffleExchangeExec =
     ShuffleExchangeExec(HashPartitioning(child.output.take(1), partitions), child)
+
+  private def singleExchange(child: SparkPlan): ShuffleExchangeExec =
+    ShuffleExchangeExec(SinglePartition, child)
 
   private def build(
       exchange: ShuffleExchangeExec,
@@ -192,7 +382,10 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
       firstSplit: String = "split-0",
       ansi: Boolean = false,
       timeZone: String = "UTC",
-      resolvedValues: Map[String, ShuffleRecoveryCanonicalValue] = Map.empty)
+      compressionEnabled: Boolean = true,
+      compressionCodec: String = "lz4",
+      compressionBlockSize: Int = DefaultCompressionBlockSize,
+      overrides: BuildOverrides = BuildOverrides())
       : ShuffleRecoveryComputationIdentity = {
     buildResult(
       exchange,
@@ -201,7 +394,10 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
       firstSplit,
       ansi,
       timeZone,
-      resolvedValues) match {
+      compressionEnabled,
+      compressionCodec,
+      compressionBlockSize,
+      overrides) match {
       case ShuffleRecoveryIdentityBuilt(identity) => identity
       case ShuffleRecoveryIdentityRejected(reason) => fail(s"identity rejected: ${reason.code}")
     }
@@ -214,16 +410,41 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
       firstSplit: String = "split-0",
       ansi: Boolean = false,
       timeZone: String = "UTC",
-      resolvedValues: Map[String, ShuffleRecoveryCanonicalValue] = Map.empty)
+      compressionEnabled: Boolean = true,
+      compressionCodec: String = "lz4",
+      compressionBlockSize: Int = DefaultCompressionBlockSize,
+      overrides: BuildOverrides = BuildOverrides())
       : ShuffleRecoveryIdentityBuildResult = {
     val range = rangeLeaf(child)
     val inputs = ShuffleRecoveryResolvedIdentityInputs.create(
       Seq(range -> ShuffleRecoverySourceToken.copyOf(
         1, source.getBytes(StandardCharsets.UTF_8))),
       decomposition(firstSplit),
-      resolvedValues,
-      ShuffleRecoveryIdentitySemanticConfig(ansi, timeZone))
+      overrides.resolvedValues,
+      semanticConfig(
+        ansi,
+        timeZone,
+        compressionEnabled,
+        compressionCodec,
+        compressionBlockSize,
+        overrides.encryptionEnabled))
     ShuffleRecoveryComputationIdentityBuilder.build(exchange, inputs)
+  }
+
+  private def semanticConfig(
+      ansi: Boolean = false,
+      timeZone: String = "UTC",
+      compressionEnabled: Boolean = true,
+      compressionCodec: String = "lz4",
+      compressionBlockSize: Int = DefaultCompressionBlockSize,
+      encryptionEnabled: Boolean = false): ShuffleRecoveryIdentitySemanticConfig = {
+    ShuffleRecoveryIdentitySemanticConfig(
+      ansi,
+      timeZone,
+      compressionEnabled,
+      compressionCodec,
+      compressionBlockSize,
+      encryptionEnabled)
   }
 
   private def rangeLeaf(plan: SparkPlan): RangeExec = {
