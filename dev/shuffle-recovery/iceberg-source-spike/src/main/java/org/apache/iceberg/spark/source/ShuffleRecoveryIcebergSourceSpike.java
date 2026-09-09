@@ -59,6 +59,7 @@ import org.apache.iceberg.expressions.Or;
 import org.apache.iceberg.expressions.UnboundPredicate;
 import org.apache.iceberg.spark.Spark3Util;
 import org.apache.iceberg.types.Types;
+import org.apache.spark.shuffle.ShuffleRecoveryCanonicalInputs;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
@@ -367,6 +368,16 @@ public final class ShuffleRecoveryIcebergSourceSpike {
         dataset.queryExecution().executedPlan(), certificate.plannedScan,
         certificate.identityBytes, certificate.decompositionDigest, certificate.mapperCount,
         "reference-shuffle-provider-v1");
+  }
+
+  /** Out-of-tree handoff; certification must run before another caller plans this Dataset. */
+  public static ShuffleRecoveryCanonicalInputs canonicalInputs(
+      Dataset<Row> dataset, String providerReadFormatId) {
+    Certificate certificate = requireCertified(certify(dataset));
+    return ShuffleRecoveryIcebergIdentityBridge.inputs(
+        dataset.queryExecution().executedPlan(), certificate.plannedScan,
+        certificate.identityBytes, certificate.decompositionDigest, certificate.mapperCount,
+        providerReadFormatId);
   }
 
   /**

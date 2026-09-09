@@ -110,3 +110,8 @@ a changed source token or missing provider index triggers recomputation with ide
 The next runtime work is to connect the certified actual SQL producer to publication and adoption,
 then replace dense status reconstruction with explicit provider-native reads and prove complete
 consumer invalidation. Those behaviors are not implemented merely because this document exists.
+
+Candidate `7c52afc16cd` passed every job in
+[run 34369849014](https://github.com/unikdahal/spark/actions/runs/34369849014), including the
+generic cold-process source adapter path and certified dependency tests. The following
+Iceberg adapter and cold-process runner are new work and require their own CI validation.

@@ -406,5 +406,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: shuffle-recovery-iceberg-source-evidence-${{ github.run_id }}
-          path: ${{ runner.temp }}/shuffle-recovery-iceberg-source-evidence.tsv
+          path: |
+            ${{ runner.temp }}/shuffle-recovery-iceberg-source-evidence.tsv
+            ${{ runner.temp }}/shuffle-recovery-iceberg-source-evidence.tsv.cold
           if-no-files-found: error

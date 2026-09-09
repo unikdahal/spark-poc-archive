@@ -154,5 +154,18 @@ The shared-filesystem proof exercises this entry point with the deterministic Ra
 including source-token, missing-artifact, and producer-filter controls. Existing cold-process
 suites retain their original built-in source when the adapter setting is absent. An actual
 Iceberg adapter must additionally capture the exact planned scan, persist source data across
-children, and avoid reconstructing certificates from a later `latest` snapshot. That adapter
-and the corresponding cross-driver Iceberg execution remain pending.
+children, and avoid reconstructing certificates from a later `latest` snapshot. The out-of-tree `ShuffleRecoveryIcebergColdSource` now implements this contract;
+its cross-driver execution requires validation on the new candidate.
+
+The dedicated Iceberg runner now invokes `cold-process.sh` after source conformance. Setup,
+baseline, producer, replacement, and each negative control run in separate forked JVMs.
+Only the warehouse and retained artifacts survive scratch cleanup. The runner requires
+32 identical result rows, distinct process identities, a different replacement shuffle ID,
+zero selected map tasks and positive provider reads on adoption, and recomputation without
+provider reads for every negative control. One control overwrites the Iceberg table with
+the same values and verifies that the committed snapshot ID changes before recovery.
+This real snapshot change is separate from the synthetic source-token discriminator.
+
+This new Iceberg proof uses local executors and the reference provider. It does not prove
+Celeborn retention, remote Iceberg executors, production storage semantics, or automatic
+query integration. CI preserves raw child logs, result evidence, and both snapshot IDs.

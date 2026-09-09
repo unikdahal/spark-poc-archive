@@ -19,6 +19,7 @@ package org.apache.spark.sql.execution.exchange
 
 import java.nio.ByteBuffer
 
+import org.apache.spark.shuffle.ShuffleRecoveryCanonicalInputs
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 
@@ -31,6 +32,17 @@ object ShuffleRecoveryIcebergIdentityBridge {
       decompositionDigest: Array[Byte],
       mapperCount: Int,
       providerReadFormatId: String): String = {
+    inputs(root, scan, certificate, decompositionDigest, mapperCount, providerReadFormatId)
+      .computation.digest
+  }
+
+  def inputs(
+      root: SparkPlan,
+      scan: BatchScanExec,
+      certificate: Array[Byte],
+      decompositionDigest: Array[Byte],
+      mapperCount: Int,
+      providerReadFormatId: String): ShuffleRecoveryCanonicalInputs = {
     val exchanges = root.collect { case exchange: ShuffleExchangeExec => exchange }
     require(exchanges.size == 1, "expected exactly one real shuffle boundary")
     val exchange = exchanges.head
@@ -50,7 +62,7 @@ object ShuffleRecoveryIcebergIdentityBridge {
         throw new IllegalArgumentException(s"Iceberg binding refused: $reason"),
         binding => binding)
     ShuffleRecoveryCertifiedBatchInputs.build(exchange, binding, providerReadFormatId) match {
-      case Right(inputs) => inputs.computation.digest
+      case Right(inputs) => inputs
       case Left(reason) =>
         throw new IllegalArgumentException(s"Iceberg canonical identity refused: $reason")
     }
