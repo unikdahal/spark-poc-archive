@@ -31,7 +31,7 @@ import scala.jdk.CollectionConverters._
 import org.apache.spark.{MapOutputTrackerMaster, ShuffleRecoverySchedulerAdoption, SparkEnv}
 import org.apache.spark.scheduler.{SparkListener, SparkListenerStageSubmitted, SparkListenerTaskStart}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
+import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleRecoveryCanonicalRangeInputs}
 import org.apache.spark.sql.functions.{col, lit, pmod, repeat, substring, when}
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.storage.ShuffleBlockId
@@ -63,7 +63,7 @@ object ShuffleRecoveryColdProcessProcess {
       scenarioValue: Scenario,
       control: String,
       testedCommit: String,
-      identity: ShuffleRecoveryFeasibilityIdentity,
+      identity: ShuffleRecoveryManifestIdentity,
       group: String)
 
   private final case class EvidenceShuffle(
@@ -190,8 +190,8 @@ object ShuffleRecoveryColdProcessProcess {
       if (scenarioValue.rows > 0L) {
         require(listener.taskCount > 0L, "ordinary non-empty baseline ran no shuffle map tasks")
       }
-      val identity = feasibility(scenarioValue, sourceToken(scenarioValue)).identityFor(
-        target(exchange, materialization = 0L))
+      val identity = identityInputs(exchange, scenarioValue, sourceToken(scenarioValue))
+        .identityFor(target(exchange, materialization = 0L))
       writeEvidence(
         evidencePath,
         buildEvidence(
@@ -254,8 +254,8 @@ object ShuffleRecoveryColdProcessProcess {
       val summary = copyCompletedShuffle(exchange, provider)
       validateScenarioShape(scenarioValue, summary)
 
-      val identity = feasibility(scenarioValue, sourceToken(scenarioValue)).identityFor(
-        target(exchange, materialization = 0L))
+      val identity = identityInputs(exchange, scenarioValue, sourceToken(scenarioValue))
+        .identityFor(target(exchange, materialization = 0L))
       val manifest = ShuffleRecoveryManifest(
         group,
         ProviderGeneration,
@@ -363,7 +363,7 @@ object ShuffleRecoveryColdProcessProcess {
         group,
         scenarioValue,
         exchange,
-        feasibility(scenarioValue, requestedSource),
+        identityInputs(exchange, scenarioValue, requestedSource),
         control)
 
       val result = collectResult(query)
@@ -386,8 +386,8 @@ object ShuffleRecoveryColdProcessProcess {
         validateMissReplacement(control, listener, reads, adopted)
       }
 
-      val identity = feasibility(scenarioValue, sourceToken(scenarioValue)).identityFor(
-        target(exchange, materialization = 0L))
+      val identity = identityInputs(exchange, scenarioValue, sourceToken(scenarioValue))
+        .identityFor(target(exchange, materialization = 0L))
       writeEvidence(
         evidencePath,
         buildEvidence(
@@ -451,7 +451,7 @@ object ShuffleRecoveryColdProcessProcess {
       group: String,
       scenarioValue: Scenario,
       exchange: ShuffleExchangeExec,
-      inputs: ShuffleRecoveryFeasibilityInputs,
+      inputs: ShuffleRecoveryIdentityInputs,
       control: String): Boolean = {
     if (control == "disabled") {
       return false
@@ -497,7 +497,7 @@ object ShuffleRecoveryColdProcessProcess {
       .findCompatible(requestGroup, expectedIdentity, currentGeneration)
 
     if (control == "digest-collision") {
-      val normalIdentity = feasibility(scenarioValue, sourceToken(scenarioValue))
+      val normalIdentity = identityInputs(exchange, scenarioValue, sourceToken(scenarioValue))
         .identityFor(currentTarget)
       val manifest = new ShuffleRecoveryManifestStore(manifestRoot(root))
         .findCompatible(group, normalIdentity, ReplacementGeneration)
@@ -511,7 +511,8 @@ object ShuffleRecoveryColdProcessProcess {
     val manifest = found match {
       case Some(value) if control == "provider-compat" =>
         value.copy(
-          identity = value.identity.copy(providerCompatibilityId = "incompatible-v1"))
+          identity = value.identity.asInstanceOf[ShuffleRecoveryFeasibilityIdentity]
+            .copy(providerCompatibilityId = "incompatible-v1"))
       case Some(value) => value
       case None => return false
     }
@@ -603,8 +604,9 @@ object ShuffleRecoveryColdProcessProcess {
   private def requireForcedDigestPayloadMismatchIsRejected(
       manifest: ShuffleRecoveryManifest): Unit = {
     val expectedBytes = ShuffleRecoveryManifestCodec.encode(manifest)
+    val identity = manifest.identity.asInstanceOf[ShuffleRecoveryFeasibilityIdentity]
     val wrong = manifest.copy(
-      identity = manifest.identity.copy(sourceToken = manifest.identity.sourceToken + "-tampered"))
+      identity = identity.copy(sourceToken = identity.sourceToken + "-tampered"))
     val wrongBytes = ShuffleRecoveryManifestCodec.encode(wrong)
     val expectedDigest = firstHexDigest(expectedBytes)
     val wrongDigest = firstHexDigest(wrongBytes)
@@ -800,7 +802,9 @@ object ShuffleRecoveryColdProcessProcess {
     } else {
       spark.range(0L, scenarioValue.rows, 1L, scenarioValue.mappers)
     }
-    val key = scenarioValue.shape match {
+    val key = if (canonicalIdentityEnabled) {
+      col("id")
+    } else scenarioValue.shape match {
       case "skewed" =>
         val cutoff = scenarioValue.rows * 19L / 20L
         when(col("id") < lit(cutoff), lit(0L))
@@ -817,7 +821,13 @@ object ShuffleRecoveryColdProcessProcess {
       val repetitions = scenarioValue.payloadBytes / PayloadSeed.length + 1
       substring(repeat(lit(PayloadSeed), repetitions), 1, scenarioValue.payloadBytes)
     }
-    range
+    val producer = if (sys.env.get("SPARK_SHUFFLE_RECOVERY_TEST_PRODUCER_FILTER")
+        .contains("true")) {
+      range.where(col("id") >= lit(0L))
+    } else {
+      range
+    }
+    producer
       .select(col("id"), key.cast("long").as("k"), payload.as("payload"))
       .repartition(scenarioValue.reducers, col("k"))
       .select(col("id"), col("k"), col("payload"))
@@ -873,6 +883,20 @@ object ShuffleRecoveryColdProcessProcess {
       exchange.shuffleDependency.rdd.id.toLong,
       exchange.numMappers,
       exchange.numPartitions)
+  }
+
+  private def canonicalIdentityEnabled: Boolean =
+    sys.env.get("SPARK_SHUFFLE_RECOVERY_TEST_CANONICAL_IDENTITY").contains("true")
+
+  private def identityInputs(
+      exchange: ShuffleExchangeExec,
+      scenarioValue: Scenario,
+      source: String): ShuffleRecoveryIdentityInputs = {
+    if (canonicalIdentityEnabled) {
+      ShuffleRecoveryCanonicalRangeInputs.build(exchange, source)
+    } else {
+      feasibility(scenarioValue, source)
+    }
   }
 
   private def feasibility(

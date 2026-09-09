@@ -30,6 +30,35 @@ import scala.util.control.NonFatal
 
 import org.apache.spark.internal.Logging
 
+/** Closed, versioned identity envelope shared by publication, discovery and adoption. */
+private[spark] sealed trait ShuffleRecoveryManifestIdentity {
+  private[shuffle] def encodingVersion: Int
+  private[shuffle] def canonicalPayload: Vector[Byte]
+  private[shuffle] def digest: String
+  private[shuffle] def lookupPrefix: String
+  def mapperCount: Int
+  def reducerCount: Int
+  def sparkCompatibilityId: String
+  def providerCompatibilityId: String
+}
+
+/** Carries the complete computation identity, including opaque connector facts and format IDs. */
+private[spark] final case class ShuffleRecoveryCanonicalManifestIdentity(
+    computation: ShuffleRecoveryComputationIdentity) extends ShuffleRecoveryManifestIdentity {
+  override private[shuffle] def encodingVersion: Int =
+    ShuffleRecoveryComputationIdentity.EncodingVersion
+  override private[shuffle] def canonicalPayload: Vector[Byte] = computation.canonicalPayload
+  override private[shuffle] def digest: String = computation.digest
+  override private[shuffle] def lookupPrefix: String = computation.lookupPrefix
+  override def mapperCount: Int = computation.mapperDecomposition.mapperCount
+  override def reducerCount: Int = computation.partitioning match {
+    case value: ShuffleRecoveryHashPartitioning => value.numPartitions
+    case ShuffleRecoverySinglePartition => 1
+  }
+  override def sparkCompatibilityId: String = computation.compatibility.sparkCompatibilityId
+  override def providerCompatibilityId: String = computation.compatibility.providerReadFormatId
+}
+
 /**
  * Deliberately narrow Phase 0 identity used only to prove the cold-driver mechanism.
  *
@@ -45,17 +74,20 @@ private[spark] final case class ShuffleRecoveryFeasibilityIdentity(
     reducerCount: Int,
     resolvedLiteral: String,
     sparkCompatibilityId: String,
-    providerCompatibilityId: String) {
+    providerCompatibilityId: String) extends ShuffleRecoveryManifestIdentity {
 
-  private[shuffle] lazy val canonicalPayload: Vector[Byte] =
+  override private[shuffle] def encodingVersion: Int =
+    ShuffleRecoveryFeasibilityIdentity.EncodingVersion
+
+  override private[shuffle] lazy val canonicalPayload: Vector[Byte] =
     ShuffleRecoveryIdentityCodec.encode(this).toVector
 
-  private[shuffle] lazy val digest: String =
+  override private[shuffle] lazy val digest: String =
     ShuffleRecoveryManifestCodec.sha256Hex(canonicalPayload.toArray)
 
   // The short namespace is only an index fan-out key. Full digest and full canonical payload are
   // always checked before a candidate can match.
-  private[shuffle] lazy val lookupPrefix: String = digest.substring(0, 2)
+  override private[shuffle] lazy val lookupPrefix: String = digest.substring(0, 2)
 }
 
 private[spark] object ShuffleRecoveryFeasibilityIdentity {
@@ -103,7 +135,7 @@ private[spark] final case class ShuffleRecoveryManifest(
     recoveryGroup: String,
     generation: Long,
     incarnationId: String,
-    identity: ShuffleRecoveryFeasibilityIdentity,
+    identity: ShuffleRecoveryManifestIdentity,
     mapperCount: Int,
     reducerCount: Int,
     mapArtifacts: Vector[ShuffleRecoveryMapArtifact],
@@ -204,9 +236,10 @@ private[spark] object ShuffleRecoveryManifestCodec {
     writeString(out, manifest.recoveryGroup, "recovery group")
     out.writeLong(manifest.generation)
     writeString(out, manifest.incarnationId, "incarnation id")
-    out.writeInt(ShuffleRecoveryFeasibilityIdentity.EncodingVersion)
+    out.writeInt(manifest.identity.encodingVersion)
     writeString(out, manifest.identity.digest, "identity digest")
-    writeBytes(out, identityPayload, MaxIdentityBytes, "identity payload")
+    writeBytes(out, identityPayload, identityLimit(manifest.identity.encodingVersion),
+      "identity payload")
     writeString(out, manifest.identity.providerCompatibilityId, "provider compatibility id")
     out.writeInt(manifest.mapperCount)
     out.writeInt(manifest.reducerCount)
@@ -252,19 +285,24 @@ private[spark] object ShuffleRecoveryManifestCodec {
       val generation = in.readLong()
       val incarnationId = readString(in, "incarnation id")
       val identityVersion = in.readInt()
-      if (identityVersion != ShuffleRecoveryFeasibilityIdentity.EncodingVersion) {
-        throw new IOException(s"unsupported feasibility identity version: $identityVersion")
-      }
+      val payloadLimit = identityLimit(identityVersion)
       val expectedDigest = readString(in, "identity digest")
       if (!expectedDigest.matches("[0-9a-f]{64}")) {
         throw new IOException("malformed feasibility identity digest")
       }
-      val identityPayload = readBytes(in, MaxIdentityBytes, "identity payload")
+      val identityPayload = readBytes(in, payloadLimit, "identity payload")
       val actualDigest = sha256Hex(identityPayload)
       if (!constantTimeEquals(expectedDigest, actualDigest)) {
         throw new IOException("feasibility identity digest mismatch")
       }
-      val identity = ShuffleRecoveryIdentityCodec.decode(identityPayload)
+      val identity: ShuffleRecoveryManifestIdentity = identityVersion match {
+        case ShuffleRecoveryFeasibilityIdentity.EncodingVersion =>
+          ShuffleRecoveryIdentityCodec.decode(identityPayload)
+        case ShuffleRecoveryComputationIdentity.EncodingVersion =>
+          ShuffleRecoveryCanonicalManifestIdentity(
+            ShuffleRecoveryComputationIdentityCodec.decode(identityPayload))
+        case other => throw new IOException(s"unsupported manifest identity version: $other")
+      }
       if (!constantTimeEquals(identity.digest, expectedDigest)) {
         throw new IOException("canonical feasibility identity digest mismatch")
       }
@@ -371,12 +409,27 @@ private[spark] object ShuffleRecoveryManifestCodec {
     }
   }
 
-  private[shuffle] def validateIdentity(identity: ShuffleRecoveryFeasibilityIdentity): Unit = {
+  private def identityLimit(version: Int): Int = version match {
+    case ShuffleRecoveryFeasibilityIdentity.EncodingVersion => MaxIdentityBytes
+    case ShuffleRecoveryComputationIdentity.EncodingVersion =>
+      ShuffleRecoveryComputationIdentityCodec.MaxIdentityBytes
+    case other => throw new IOException(s"unsupported manifest identity version: $other")
+  }
+
+  private[shuffle] def validateIdentity(identity: ShuffleRecoveryManifestIdentity): Unit = {
     if (identity == null) {
       throw new IllegalArgumentException("feasibility identity must not be null")
     }
-    validateIdentityFields(identity)
-    if (identity.canonicalPayload.size > MaxIdentityBytes) {
+    identity match {
+      case value: ShuffleRecoveryFeasibilityIdentity => validateIdentityFields(value)
+      case value: ShuffleRecoveryCanonicalManifestIdentity =>
+        ShuffleRecoveryComputationIdentityCodec.validate(value.computation)
+        validateText(value.providerCompatibilityId, "provider compatibility id")
+        if (value.reducerCount > MaxReducers) {
+          throw new IllegalArgumentException("canonical identity exceeds reducer bound")
+        }
+    }
+    if (identity.canonicalPayload.size > identityLimit(identity.encodingVersion)) {
       throw new IllegalArgumentException("feasibility identity is too large")
     }
   }
@@ -589,7 +642,7 @@ private[spark] final class ShuffleRecoveryManifestStore(root: Path) extends Logg
    */
   def findCompatible(
       recoveryGroup: String,
-      identity: ShuffleRecoveryFeasibilityIdentity,
+      identity: ShuffleRecoveryManifestIdentity,
       currentGeneration: Long): Option[ShuffleRecoveryManifest] = {
     ShuffleRecoveryManifestCodec.validateIdentifier(recoveryGroup, "recovery group")
     ShuffleRecoveryManifestCodec.validateIdentity(identity)
@@ -655,7 +708,7 @@ private[spark] final class ShuffleRecoveryManifestStore(root: Path) extends Logg
 
   private[shuffle] def indexDirectoryFor(
       recoveryGroup: String,
-      identity: ShuffleRecoveryFeasibilityIdentity): Path =
+      identity: ShuffleRecoveryManifestIdentity): Path =
     indexDirectory(recoveryGroup, identity.lookupPrefix)
 
   private def prepareLayout(recoveryGroup: String, lookupPrefix: String): Layout = {

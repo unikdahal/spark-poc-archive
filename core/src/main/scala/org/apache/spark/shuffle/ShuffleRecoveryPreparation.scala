@@ -36,14 +36,32 @@ private[spark] final case class ShuffleRecoveryAdoptionTarget(
     mapperCount: Int,
     reducerCount: Int)
 
+private[spark] sealed trait ShuffleRecoveryIdentityInputs {
+  def identityFor(target: ShuffleRecoveryAdoptionTarget): ShuffleRecoveryManifestIdentity
+}
+
+private[spark] final case class ShuffleRecoveryCanonicalInputs(
+    computation: ShuffleRecoveryComputationIdentity) extends ShuffleRecoveryIdentityInputs {
+  override def identityFor(
+      target: ShuffleRecoveryAdoptionTarget): ShuffleRecoveryCanonicalManifestIdentity = {
+    val identity = ShuffleRecoveryCanonicalManifestIdentity(computation)
+    ShuffleRecoveryManifestCodec.validateIdentity(identity)
+    require(target != null && identity.mapperCount == target.mapperCount &&
+      identity.reducerCount == target.reducerCount,
+      "certified computation shape does not match the current dependency")
+    identity
+  }
+}
+
 private[spark] final case class ShuffleRecoveryFeasibilityInputs(
     sourceToken: String,
     producerTag: String,
     rowEncoding: String,
     partitioningShape: String,
-    resolvedLiteral: String) {
+    resolvedLiteral: String) extends ShuffleRecoveryIdentityInputs {
 
-  def identityFor(target: ShuffleRecoveryAdoptionTarget): ShuffleRecoveryFeasibilityIdentity = {
+  override def identityFor(
+      target: ShuffleRecoveryAdoptionTarget): ShuffleRecoveryFeasibilityIdentity = {
     ShuffleRecoveryFeasibilityIdentity.create(
       sourceToken,
       producerTag,
@@ -59,7 +77,7 @@ private[spark] final case class ShuffleRecoveryPreparationRequest(
     recoveryGroup: String,
     currentGeneration: Long,
     target: ShuffleRecoveryAdoptionTarget,
-    feasibility: ShuffleRecoveryFeasibilityInputs)
+    identityInputs: ShuffleRecoveryIdentityInputs)
 
 /**
  * Single-use local reservation for one asynchronous recovery decision.
@@ -258,7 +276,7 @@ private[spark] object ShuffleRecoveryExternalCallGuard {
 private[shuffle] trait ShuffleRecoveryCandidateLookup {
   def findCompatible(
       recoveryGroup: String,
-      identity: ShuffleRecoveryFeasibilityIdentity,
+      identity: ShuffleRecoveryManifestIdentity,
       currentGeneration: Long): Option[ShuffleRecoveryManifest]
 }
 
@@ -271,7 +289,7 @@ private[shuffle] final class ShuffleRecoveryManifestCandidateLookup(
 
   override def findCompatible(
       recoveryGroup: String,
-      identity: ShuffleRecoveryFeasibilityIdentity,
+      identity: ShuffleRecoveryManifestIdentity,
       currentGeneration: Long): Option[ShuffleRecoveryManifest] = {
     store.findCompatible(recoveryGroup, identity, currentGeneration)
   }

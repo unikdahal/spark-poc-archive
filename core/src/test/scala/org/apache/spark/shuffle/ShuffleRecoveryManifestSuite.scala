@@ -17,6 +17,7 @@
 
 package org.apache.spark.shuffle
 
+import java.io.IOException
 import java.nio.file.Path
 
 import org.apache.spark.{SparkConf, SparkFunSuite, Success}
@@ -123,6 +124,71 @@ class ShuffleRecoveryManifestSuite extends SparkFunSuite {
         .isEmpty)
       assert(provider.committedMapCount == 0)
     }
+  }
+
+  test("canonical identities publish and validate without connector or provider special cases") {
+    import ShuffleRecoveryComputationIdentityTestData._
+
+    for (providerFormat <- Seq("reference-shuffle-provider-v1", "alternate-provider-format-v1")) {
+      withTempDir { root =>
+        val base = baseIdentity()
+        val computation = base.copy(
+          sourceTokens = Vector(sourceToken("opaque-source-" + "x" * (20 * 1024))),
+          compatibility = base.compatibility.copy(providerReadFormatId = providerFormat))
+        val target = ShuffleRecoveryAdoptionTarget(
+          ShuffleRecoveryMaterializationId(100L, 1L), 19, 200L, 2, 2)
+        val inputs = ShuffleRecoveryCanonicalInputs(computation)
+        val identity = inputs.identityFor(target)
+        assert(identity.canonicalPayload.size > ShuffleRecoveryManifestCodec.MaxIdentityBytes)
+        val manifest = canonicalManifest(identity)
+        val encoded = ShuffleRecoveryManifestCodec.encode(manifest)
+        assert(ShuffleRecoveryManifestCodec.decode(encoded) == manifest)
+
+        val store = new ShuffleRecoveryManifestStore(root.toPath)
+        assert(store.publish(manifest) == ShuffleRecoveryManifestPublished)
+        val found = store.findCompatible("canonical-group", identity, currentGeneration = 2L)
+        assert(found.contains(manifest))
+        assert(store.findCompatible("canonical-group", identity, currentGeneration = 1L).isEmpty)
+
+        val request = ShuffleRecoveryPreparationRequest("canonical-group", 2L, target, inputs)
+        val boundary = new ShuffleRecoveryUntrustedBoundary
+        assert(boundary.validateCandidate(request, identity, found.get).isRight)
+        val changed = ShuffleRecoveryCanonicalInputs(computation.copy(
+          sourceTokens = Vector(sourceToken("changed-source")))).identityFor(target)
+        assert(store.findCompatible("canonical-group", changed, currentGeneration = 2L).isEmpty)
+        assert(boundary.validateCandidate(request, changed, manifest).isLeft)
+        assert(boundary.validateCandidate(request, identity,
+          manifest.copy(identity = changed)).isLeft)
+        intercept[IllegalArgumentException] {
+          inputs.identityFor(target.copy(mapperCount = 3))
+        }
+        intercept[IllegalArgumentException] {
+          inputs.identityFor(target.copy(reducerCount = 3))
+        }
+      }
+    }
+  }
+
+  test("canonical manifest corruption cannot pass the enclosing digest check") {
+    val identity = ShuffleRecoveryCanonicalManifestIdentity(
+      ShuffleRecoveryComputationIdentityTestData.baseIdentity())
+    val encoded = ShuffleRecoveryManifestCodec.encode(canonicalManifest(identity))
+    val offset = encoded.toVector.indexOfSlice(identity.canonicalPayload)
+    assert(offset >= 0)
+    encoded(offset + identity.canonicalPayload.size - 1) = 1.toByte
+    intercept[IOException] {
+      ShuffleRecoveryManifestCodec.decode(encoded)
+    }
+  }
+
+  private def canonicalManifest(
+      identity: ShuffleRecoveryCanonicalManifestIdentity): ShuffleRecoveryManifest = {
+    ShuffleRecoveryManifest(
+      "canonical-group", 1L, "canonical-incarnation", identity, 2, 2,
+      Vector.tabulate(2) { mapIndex =>
+        ShuffleRecoveryMapArtifact(mapIndex, mapIndex.toLong, s"map-$mapIndex", 0L, 24L)
+      },
+      ShuffleRecoveryManifest.DescriptorVersion, None, publicationTimestampMillis = 1L)
   }
 
   private def listenerWithAcceptedSelection(conf: SparkConf): ShuffleRecoveryManifestListener = {

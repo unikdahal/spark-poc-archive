@@ -55,7 +55,7 @@ private[shuffle] final case class ShuffleRecoveryValidatedCandidate(
     recoveryGroup: String,
     publishingGeneration: Long,
     incarnationId: String,
-    identity: ShuffleRecoveryFeasibilityIdentity,
+    identity: ShuffleRecoveryManifestIdentity,
     mapperCount: Int,
     reducerCount: Int,
     descriptorVersion: Int,
@@ -83,7 +83,7 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
 
   def validateCandidate(
       request: ShuffleRecoveryPreparationRequest,
-      expectedIdentity: ShuffleRecoveryFeasibilityIdentity,
+      expectedIdentity: ShuffleRecoveryManifestIdentity,
       manifest: ShuffleRecoveryManifest): Either[String, ShuffleRecoveryValidatedCandidate] = {
     try {
       if (request == null || request.target == null || expectedIdentity == null ||
@@ -98,13 +98,13 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
         return Left("candidate generation is not strictly earlier than the current generation")
       }
       ShuffleRecoveryManifestCodec.validateManifest(manifest)
+      val currentIdentity = request.identityInputs.identityFor(request.target)
+      if (currentIdentity.canonicalPayload != expectedIdentity.canonicalPayload) {
+        return Left("expected identity does not match the current resolved inputs")
+      }
       if (manifest.identity.digest != expectedIdentity.digest ||
           manifest.identity.canonicalPayload != expectedIdentity.canonicalPayload) {
         return Left("candidate feasibility identity does not match the current exchange")
-      }
-      if (manifest.identity.providerCompatibilityId !=
-          ShuffleRecoveryFeasibilityIdentity.ProviderCompatibilityId) {
-        return Left("candidate provider compatibility id is unsupported")
       }
       if (manifest.mapperCount != request.target.mapperCount ||
           manifest.reducerCount != request.target.reducerCount) {

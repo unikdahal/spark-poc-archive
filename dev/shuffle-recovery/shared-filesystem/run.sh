@@ -53,6 +53,7 @@ findmnt --target "${mount_root}" --output SOURCE,FSTYPE,OPTIONS > "${EVIDENCE_DI
 stat -f -c '%T' "${mount_root}" | grep -Fx nfs
 
 export SPARK_SHUFFLE_RECOVERY_TEST_MASTER='local-cluster[2,1,1024]'
+export SPARK_SHUFFLE_RECOVERY_TEST_CANONICAL_IDENTITY=true
 export SPARK_SHUFFLE_RECOVERY_TEST_LOCAL_ROOT="${local_root}"
 # LocalSparkCluster creates worker directories beneath java.io.tmpdir. Standalone executors
 # honor SPARK_LOCAL_DIRS before spark.local.dir; isolate both so the purge covers all scratch.
@@ -78,7 +79,11 @@ rm -rf "${local_root}"
 mkdir -p "${local_root}"
 run_child replacement replacement "evidence=${EVIDENCE_DIR}/replacement.tsv" \
   "baseline=${EVIDENCE_DIR}/baseline.tsv producer=${EVIDENCE_DIR}/producer.tsv"
-for control in source-token artifact-missing; do
+for control in source-token artifact-missing producer-filter; do
+  export SPARK_SHUFFLE_RECOVERY_TEST_PRODUCER_FILTER=false
+  if [[ "${control}" == producer-filter ]]; then
+    export SPARK_SHUFFLE_RECOVERY_TEST_PRODUCER_FILTER=true
+  fi
   rm -rf "${local_root}"
   mkdir -p "${local_root}"
   run_child "${control}" replacement "evidence=${EVIDENCE_DIR}/${control}.tsv" \
@@ -112,6 +117,8 @@ base, producer, replacement = [record(n) for n in ['baseline', 'producer', 'repl
 assert [r['role'] for r in [base, producer, replacement]] == [
     'baseline', 'producer', 'replacement']
 assert all(r['control'] == 'none' for r in [base, producer, replacement])
+assert all(r['sparkCompatibility'].endswith('-identity-v2')
+           for r in [base, producer, replacement])
 assert int(base['mapTaskCount']) > 0 and int(producer['mapTaskCount']) > 0
 assert base['resultDigest'] == producer['resultDigest'] == replacement['resultDigest']
 assert base['rowCount'] == producer['rowCount'] == replacement['rowCount']
@@ -119,7 +126,7 @@ assert replacement['adopted'] == 'true'
 assert replacement['mapTaskCount'] == '0'
 assert int(replacement['providerBytesRead']) > 0
 assert replacement['currentShuffleId'] != producer['originShuffleId']
-for control in ['source-token', 'artifact-missing']:
+for control in ['source-token', 'artifact-missing', 'producer-filter']:
     missed = record(control)
     assert missed['role'] == 'replacement' and missed['control'] == control
     assert missed['adopted'] == 'false' and int(missed['mapTaskCount']) > 0

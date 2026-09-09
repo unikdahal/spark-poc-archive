@@ -4,6 +4,26 @@ The active integration candidate is `spip/poc-owned-end-to-end`. Work is driven 
 behavior and evidence, not by the old issue boundaries. The frozen Phase 0 evidence remains
 unchanged. Open-PR source compatibility and evidence-validation work is preserved in merge history.
 
+## Generic extension boundaries
+
+Iceberg and Celeborn are the primary integration targets, in different roles: the source connector
+certifies the resolved read, and the shuffle provider retains and serves completed output. Core
+must not select behavior by either product name. Other connectors and providers should implement
+the same eventual contracts. NFS and the built-in Range source are validation fixtures.
+
+The current implementation connects the full canonical computation identity to the existing
+manifest store and adoption-validation boundary. A versioned identity envelope retains the legacy
+Phase 0 encoding and admits the bounded canonical encoding, including opaque source tokens and
+provider format IDs. Discovery compares the full payload after a digest lookup. Preparation checks
+that the supplied identity agrees with the current resolved inputs and dependency shape.
+
+The shared-filesystem fixture now reconstructs a Range/Project/Shuffle computation in each child
+JVM and uses that canonical identity for publication and recovery. A changed producer filter must
+miss even when the source token and expected rows are unchanged. Core tests also exercise a
+non-reference provider format identifier; that proves generic identity handling, not an implemented
+alternative provider read path. The retained map-descriptor format and runtime provider integration
+still need to become a complete provider contract. No generic public SPI is declared finished here.
+
 ## What the current candidate is establishing
 
 1. Exact-candidate Core and SQL correctness, including independently launched cold/healing JVMs.
@@ -56,8 +76,10 @@ preserved exact values, repeated/pinned snapshot identity, latest-snapshot advan
 decomposition and preserved ordinary source errors. The earlier candidate `a109e7c7488` had failed
 only the unconditional schema-evolution identity assertion; the corrected requirement now passes.
 
-The additional row-delete refusal, shared-filesystem negative controls, child process provenance,
-complete scratch isolation and runtime cache require a newer run. No production authorization,
+Candidate `84f72b10c972490e4af78542197b1c579c9b5cca` also passed the complete gate in
+[run 34276458479](https://github.com/unikdahal/spark/actions/runs/34276458479), including row-delete
+refusal, shared-filesystem negative controls, child provenance and scratch isolation. The subsequent
+canonical-manifest integration requires its own exact-candidate validation. No production authorization,
 AQE recovery, performance or SPIP acceptance claim follows from the completed checks. Ordinary
 latest-source resolution and ordinary errors remain authoritative.
 
