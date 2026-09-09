@@ -23,6 +23,20 @@ decomposition. Spark adds the reviewed SQL producer, output and shuffle-partitio
 The connector binding must also identify the certification protocol and version, so unrelated
 connectors cannot accidentally equate identical opaque bytes. A token is not a provider locator.
 
+The implementation adds `ShuffleRecoverySourceToken.forProtocol` to frame a protocol ID and
+opaque certificate with explicit lengths and an envelope marker. The protocol version remains in
+the source token's version field. Protocol identifiers use strict UTF-8 with a 1 KiB encoded bound;
+the complete frame, including metadata, must fit the existing 64 KiB source-token bound. The
+factory defensively owns the certificate bytes. Protocol IDs are compared exactly; no case folding
+or Unicode normalization is implied. The Range fixture now uses this factory. Legacy `copyOf`
+callers retain their existing bytes, so adoption of the protocol factory is explicit rather than
+an assertion that every existing caller already supplies namespaced facts.
+
+This framing identifies a compatibility protocol; it does not authenticate a connector or establish
+that its claims are true. A future source binding must associate the certificate with the actual
+configured connector and planned scan. The framing patch and its regression tests still require
+exact-candidate compilation and execution before a passing conformance result is claimed.
+
 The connector either provides immutable bounded facts or explicitly refuses certification. Normal
 source resolution and authorization happen first; their failures retain ordinary query semantics.
 A certificate establishes read reproducibility, not authority to access source or retained output.

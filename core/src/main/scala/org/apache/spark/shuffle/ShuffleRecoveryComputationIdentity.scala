@@ -221,6 +221,48 @@ private[spark] final case class ShuffleRecoverySourceToken(
     payload: Vector[Byte])
 
 private[spark] object ShuffleRecoverySourceToken {
+  private val ProtocolMagic = 0x53524331 // SRC1
+  private[shuffle] val MaxProtocolBytes = 1024
+
+  /**
+   * Frames a connector certificate with its certification protocol, separately from the opaque
+   * connector bytes. Protocol IDs and versions describe semantics, not implementation classes or
+   * credentials. Sharing a protocol is an explicit compatibility contract between connectors.
+   * Legacy copyOf callers retain their original encoding.
+   */
+  private[spark] def forProtocol(
+      protocolId: String,
+      version: Int,
+      certificate: Array[Byte]): ShuffleRecoverySourceToken = {
+    require(protocolId != null && protocolId.nonEmpty && protocolId.length <= MaxProtocolBytes,
+      "invalid source certification protocol identifier")
+    require(version > 0, "source certification protocol version must be positive")
+    require(certificate != null && certificate.nonEmpty &&
+      certificate.length <= ShuffleRecoveryComputationIdentityCodec.MaxTokenBytes,
+      "invalid source certificate size")
+    val protocol = try {
+      StandardCharsets.UTF_8.newEncoder()
+        .onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT)
+        .encode(CharBuffer.wrap(protocolId))
+    } catch {
+      case NonFatal(e) =>
+        throw new IllegalArgumentException("invalid UTF-8 source certification protocol", e)
+    }
+    require(protocol.remaining() <= MaxProtocolBytes,
+      "source certification protocol exceeds encoded size limit")
+    val size = 12L + protocol.remaining() + certificate.length
+    require(size <= ShuffleRecoveryComputationIdentityCodec.MaxTokenBytes,
+      "framed source certificate exceeds token size limit")
+    val framed = ByteBuffer.allocate(size.toInt)
+      .putInt(ProtocolMagic)
+      .putInt(protocol.remaining())
+      .put(protocol)
+      .putInt(certificate.length)
+      .put(certificate)
+    ShuffleRecoverySourceToken(version, framed.array().toVector)
+  }
+
   private[spark] def copyOf(version: Int, payload: Array[Byte]): ShuffleRecoverySourceToken = {
     if (payload == null) {
       throw new IllegalArgumentException("source token payload must not be null")

@@ -162,6 +162,67 @@ class ShuffleRecoveryComputationIdentitySuite extends SparkFunSuite {
     assert(binary.value === Vector[Byte](1, 2, 3))
   }
 
+  test("connector protocol and version separate otherwise identical source certificates") {
+    val bytes = Array[Byte](1, 2, 3)
+    val first = ShuffleRecoverySourceToken.forProtocol("example.source-a", 1, bytes)
+    val repeated = ShuffleRecoverySourceToken.forProtocol("example.source-a", 1, bytes)
+    val otherProtocol = ShuffleRecoverySourceToken.forProtocol("example.source-b", 1, bytes)
+    val otherVersion = ShuffleRecoverySourceToken.forProtocol("example.source-a", 2, bytes)
+    assert(first == repeated)
+    val identity = baseIdentity().copy(sourceTokens = Vector(first))
+    for (other <- Seq(otherProtocol, otherVersion)) {
+      val changed = identity.copy(sourceTokens = Vector(other))
+      assert(changed.canonicalPayload != identity.canonicalPayload)
+      assert(changed.digest != identity.digest)
+    }
+    assert(ShuffleRecoveryComputationIdentityCodec.decode(
+      identity.canonicalPayload.toArray) == identity)
+    bytes(0) = 99.toByte
+    assert(first == repeated)
+    assert(first != ShuffleRecoverySourceToken.forProtocol("example.source-a", 1, bytes))
+
+    // Length framing distinguishes pairs that would collide under raw concatenation.
+    val left = ShuffleRecoverySourceToken.forProtocol("a", 1, Array[Byte](98, 99))
+    val right = ShuffleRecoverySourceToken.forProtocol("ab", 1, Array[Byte](99))
+    assert(left != right)
+  }
+
+  test("source certificate framing includes all bytes in the token limit") {
+    val maximum = ShuffleRecoveryComputationIdentityCodec.MaxTokenBytes
+    val certificate = new Array[Byte](maximum - 13) // Three lengths/tags and one protocol byte.
+    val token = ShuffleRecoverySourceToken.forProtocol("a", 1, certificate)
+    assert(token.payload.size == maximum)
+    val identity = baseIdentity().copy(sourceTokens = Vector(token))
+    assert(ShuffleRecoveryComputationIdentityCodec.decode(
+      identity.canonicalPayload.toArray) == identity)
+    intercept[IllegalArgumentException] {
+      ShuffleRecoverySourceToken.forProtocol("a", 1, new Array[Byte](certificate.length + 1))
+    }
+  }
+
+  test("source certificate framing rejects missing facts and malformed protocol identifiers") {
+    val bytes = Array[Byte](1)
+    val malformed = new String(Array(0xd800.toChar))
+    val multibyte = 0xe9.toChar.toString * ShuffleRecoverySourceToken.MaxProtocolBytes
+    for (protocol <- Seq(null, "", malformed, multibyte,
+        "x" * (ShuffleRecoverySourceToken.MaxProtocolBytes + 1))) {
+      intercept[IllegalArgumentException] {
+        ShuffleRecoverySourceToken.forProtocol(protocol, 1, bytes)
+      }
+    }
+    for (version <- Seq(0, -1)) {
+      intercept[IllegalArgumentException] {
+        ShuffleRecoverySourceToken.forProtocol("example.source", version, bytes)
+      }
+    }
+    for (certificate <- Seq(null, Array.emptyByteArray,
+        new Array[Byte](ShuffleRecoveryComputationIdentityCodec.MaxTokenBytes + 1))) {
+      intercept[IllegalArgumentException] {
+        ShuffleRecoverySourceToken.forProtocol("example.source", 1, certificate)
+      }
+    }
+  }
+
   test("NaN encoding is canonical while signed zero remains explicit") {
     val nanA = java.lang.Float.intBitsToFloat(0x7fc00001)
     val nanB = java.lang.Float.intBitsToFloat(0x7fffffff)

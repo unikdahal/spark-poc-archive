@@ -46,8 +46,8 @@ private[spark] object ShuffleRecoveryCanonicalRangeInputs {
       })
     val conf = SparkEnv.get.conf
     val inputs = ShuffleRecoveryResolvedIdentityInputs.create(
-      Seq(range -> ShuffleRecoverySourceToken.copyOf(1,
-        ("spark-range-source-v1:" + source).getBytes(StandardCharsets.UTF_8))),
+      Seq(range -> ShuffleRecoverySourceToken.forProtocol(
+        "org.apache.spark.range", 1, source.getBytes(StandardCharsets.UTF_8))),
       decomposition,
       Map.empty,
       ShuffleRecoveryIdentitySemanticConfig(
