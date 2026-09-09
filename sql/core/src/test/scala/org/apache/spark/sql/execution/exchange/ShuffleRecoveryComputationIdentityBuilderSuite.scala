@@ -21,11 +21,13 @@ import java.nio.charset.StandardCharsets
 
 import org.apache.spark.SparkArithmeticException
 import org.apache.spark.shuffle.{
+  ShuffleRecoveryAdoptionTarget,
   ShuffleRecoveryCanonicalValue,
   ShuffleRecoveryComputationIdentity,
   ShuffleRecoveryIntValue,
   ShuffleRecoveryMapperDecomposition,
   ShuffleRecoveryMapperSplit,
+  ShuffleRecoveryMaterializationId,
   ShuffleRecoverySourceToken}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{
@@ -46,7 +48,7 @@ import org.apache.spark.sql.catalyst.plans.physical.{
   RangePartitioning,
   SinglePartition}
 import org.apache.spark.sql.catalyst.util.CollationFactory
-import org.apache.spark.sql.connector.read.{Batch, HasPartitionKey, InputPartition, PartitionReaderFactory, Scan}
+import org.apache.spark.sql.connector.read.{Batch, HasPartitionKey, InputPartition, PartitionReader, PartitionReaderFactory, Scan}
 import org.apache.spark.sql.execution.{ProjectExec, RangeExec, SparkPlan}
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 import org.apache.spark.sql.test.SharedSparkSession
@@ -126,6 +128,38 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
     val binding = ShuffleRecoverySourceBinding.bind(
       plan, "example.source", 1, Array[Byte](2), entries).toOption.get
     assert(certifiedBuild(plan, binding).isInstanceOf[ShuffleRecoveryIdentityBuilt])
+  }
+
+  test("certified batch inputs bind publication identity to the actual shuffle dependency") {
+    val plan = batchPlan()
+    val binding = ShuffleRecoverySourceBinding.bind(plan, "example.source", 1, Array[Byte](2),
+      plan.inputPartitions.toVector.map(_ -> Array[Byte](1))).toOption.get
+    val exchange = hashExchange(plan, 3)
+    val inputs = ShuffleRecoveryCertifiedBatchInputs.build(
+      exchange, binding, "test-provider-v1").toOption.get
+    val dependency = exchange.shuffleDependency
+    val target = ShuffleRecoveryAdoptionTarget(ShuffleRecoveryMaterializationId(1, 1),
+      dependency.shuffleId, 1, dependency.rdd.partitions.length, 3)
+    val manifestIdentity = inputs.identityFor(target)
+    assert(manifestIdentity.mapperCount === 2)
+    assert(manifestIdentity.reducerCount === 3)
+    assert(inputs.computation.compatibility.providerReadFormatId === "test-provider-v1")
+    intercept[IllegalArgumentException] {
+      inputs.identityFor(target.copy(mapperCount = 3))
+    }
+    assert(ShuffleRecoveryCertifiedBatchInputs.build(hashExchange(plan.copy()), binding,
+      "test-provider-v1") === Left(SourceTokenUnavailable))
+  }
+
+  test("certified input preparation preserves ordinary reader factory failures") {
+    val failure = new IllegalStateException("source reader factory failed")
+    val plan = batchPlan(readerFailure = Some(failure))
+    val binding = ShuffleRecoverySourceBinding.bind(plan, "example.source", 1, Array[Byte](2),
+      plan.inputPartitions.toVector.map(_ -> Array[Byte](1))).toOption.get
+    val thrown = intercept[IllegalStateException] {
+      ShuffleRecoveryCertifiedBatchInputs.build(hashExchange(plan), binding, "test-provider-v1")
+    }
+    assert(thrown eq failure)
   }
 
   test("ordinary source planning failures are not converted to certification misses") {
@@ -441,7 +475,8 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
 
   private def batchPlan(
       failure: Option[RuntimeException] = None,
-      hasPartitionKey: Boolean = false): BatchScanExec = {
+      hasPartitionKey: Boolean = false,
+      readerFailure: Option[RuntimeException] = None): BatchScanExec = {
     val source = new Scan with Batch {
       override def readSchema(): StructType = new StructType().add("id", IntegerType)
       override def toBatch: Batch = this
@@ -458,8 +493,13 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
           }
         }
       }
-      override def createReaderFactory(): PartitionReaderFactory =
-        throw new UnsupportedOperationException("identity tests do not read partitions")
+      override def createReaderFactory(): PartitionReaderFactory = {
+        readerFailure.foreach(error => throw error)
+        new PartitionReaderFactory {
+          override def createReader(partition: InputPartition): PartitionReader[InternalRow] =
+            throw new UnsupportedOperationException("identity tests must not execute source reads")
+        }
+      }
     }
     BatchScanExec(Seq(AttributeReference("id", IntegerType)()), source, Nil, table = null)
   }

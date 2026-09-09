@@ -131,3 +131,11 @@ exact result checks. Merely implementing `HasPartitionKey` does not mean a read 
 the binding rejects planned grouping through `BatchScanExec.keyGroupedPartitioning`.
 This distinction matters because the pinned Iceberg partition implementation exposes that
 interface even for ungrouped reads.
+
+`ShuffleRecoveryCertifiedBatchInputs` is the connector-neutral handoff to the existing
+publication and recovery identity inputs. It reads the exchange's semantic settings,
+requires canonical admission, and checks the certified mapper count against the actual
+shuffle dependency before returning `ShuffleRecoveryCanonicalInputs`. The selected provider
+format remains an explicit argument. The Iceberg conformance bridge delegates to this
+handoff. Ordinary reader-factory and dependency-planning failures propagate; this helper
+does not publish artifacts, reserve adoption, or suppress ordinary query errors.

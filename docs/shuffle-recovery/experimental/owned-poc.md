@@ -86,8 +86,12 @@ canonical-manifest integration passed in
 `4aa9889f9350bad49f9b873d1ec9017a281c5cfa`. Its canonical NFS replacement ran zero map tasks and
 read 1,152 provider bytes. Source-token, missing-artifact and producer-filter controls each ran four
 map tasks, read no provider bytes and returned the same 32 rows and digest as the baseline. Core
-also passed the canonical manifest and alternate provider-format metadata tests. The later change
-making the selected provider format an explicit SQL-builder input requires its own validation. No production authorization,
+also passed the canonical manifest and alternate provider-format metadata tests. The selected provider-format input and planned Iceberg scan binding subsequently passed
+the complete gate in [run 34354255853](https://github.com/unikdahal/spark/actions/runs/34354255853)
+for candidate `80e3a36078c47490c8d8bb0e48e555f352295948`. The Iceberg evidence includes passing
+`canonical_shuffle_replanning` and `canonical_shuffle_snapshot_binding` checks with exact query
+results. This proves canonical identity construction for actual Iceberg shuffle producers;
+it does not yet prove cross-driver adoption of their retained output. No production authorization,
 AQE recovery, performance or SPIP acceptance claim follows from the completed checks. Ordinary
 latest-source resolution and ordinary errors remain authoritative.
 

@@ -19,7 +19,6 @@ package org.apache.spark.sql.execution.exchange
 
 import java.nio.ByteBuffer
 
-import org.apache.spark.SparkEnv
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 
@@ -50,22 +49,9 @@ object ShuffleRecoveryIcebergIdentityBridge {
       certificate, descriptors).fold(reason =>
         throw new IllegalArgumentException(s"Iceberg binding refused: $reason"),
         binding => binding)
-    val conf = SparkEnv.get.conf
-    val inputs = ShuffleRecoveryResolvedIdentityInputs.create(
-      Nil, binding.decomposition, Map.empty,
-      ShuffleRecoveryIdentitySemanticConfig(
-        exchange.conf.ansiEnabled,
-        exchange.conf.sessionLocalTimeZone,
-        conf.getBoolean("spark.shuffle.compress", true),
-        conf.get("spark.io.compression.codec", "lz4"),
-        conf.getSizeAsBytes("spark.io.compression.lz4.blockSize", "32k").toInt,
-        conf.getBoolean("spark.io.encryption.enabled", false)),
-      providerReadFormatId, Some(binding))
-    require(exchange.shuffleDependency.rdd.partitions.length == mapperCount,
-      "source partitions must map one-to-one to actual shuffle mappers")
-    ShuffleRecoveryComputationIdentityBuilder.build(exchange, inputs) match {
-      case ShuffleRecoveryIdentityBuilt(result) => result.digest
-      case ShuffleRecoveryIdentityRejected(reason) =>
+    ShuffleRecoveryCertifiedBatchInputs.build(exchange, binding, providerReadFormatId) match {
+      case Right(inputs) => inputs.computation.digest
+      case Left(reason) =>
         throw new IllegalArgumentException(s"Iceberg canonical identity refused: $reason")
     }
   }
