@@ -139,3 +139,20 @@ shuffle dependency before returning `ShuffleRecoveryCanonicalInputs`. The select
 format remains an explicit argument. The Iceberg conformance bridge delegates to this
 handoff. Ordinary reader-factory and dependency-planning failures propagate; this helper
 does not publish artifacts, reserve adoption, or suppress ordinary query errors.
+
+### Cold-process source adapters
+
+The test-only `ShuffleRecoveryColdProcessSource` contract lets an external connector reuse
+the existing producer, durable manifest, replacement-driver, and negative-control harness.
+`SPARK_SHUFFLE_RECOVERY_TEST_SOURCE_ADAPTER` selects a class from the test classpath, loaded
+independently in each child JVM. The adapter supplies session options, reconstructs the
+query from durable source facts, and returns its certified identity inputs. Certificate
+capture must happen during query planning, before the harness requests its exchange.
+The returned query follows the harness's `id`, `k`, `payload` result contract.
+
+The shared-filesystem proof exercises this entry point with the deterministic Range adapter,
+including source-token, missing-artifact, and producer-filter controls. Existing cold-process
+suites retain their original built-in source when the adapter setting is absent. An actual
+Iceberg adapter must additionally capture the exact planned scan, persist source data across
+children, and avoid reconstructing certificates from a later `latest` snapshot. That adapter
+and the corresponding cross-driver Iceberg execution remain pending.

@@ -35,6 +35,7 @@ import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleReco
 import org.apache.spark.sql.functions.{col, lit, pmod, repeat, substring, when}
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.storage.ShuffleBlockId
+import org.apache.spark.util.Utils
 
 /**
  * Child entry point for the cold-process shuffle recovery proof.
@@ -55,6 +56,14 @@ object ShuffleRecoveryColdProcessProcess {
   private val PayloadSeed =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   private val EmptyReads = ShuffleRecoveryReadMetrics(0L, 0L, 0L, 0L)
+
+  private lazy val sourceAdapter: Option[ShuffleRecoveryColdProcessSource] = {
+    sys.env.get("SPARK_SHUFFLE_RECOVERY_TEST_SOURCE_ADAPTER").map { className =>
+      val adapterClass = Utils.classForName[AnyRef](className)
+        .asSubclass(classOf[ShuffleRecoveryColdProcessSource])
+      adapterClass.getConstructor().newInstance()
+    }
+  }
 
   private final case class ResultSummary(rowCount: Long, digest: String)
 
@@ -132,7 +141,9 @@ object ShuffleRecoveryColdProcessProcess {
       createParentDirectories(path)
       val process = ProcessHandle.current()
       val master = sys.env.getOrElse("SPARK_SHUFFLE_RECOVERY_TEST_MASTER", "local[2]")
+      val adapterName = sourceAdapter.map(_.getClass.getName).getOrElse("builtin")
       val evidence = s"testedCommit=$testedCommit\nmode=$mode\nmaster=$master\n" +
+        s"sourceAdapter=$adapterName\n" +
         s"pid=${process.pid()}\nstarted=${process.info().startInstant().get()}\n"
       Files.write(path, evidence.getBytes(StandardCharsets.UTF_8), StandardOpenOption.CREATE_NEW)
     }
@@ -795,6 +806,10 @@ object ShuffleRecoveryColdProcessProcess {
   }
 
   private def buildQuery(spark: SparkSession, scenarioValue: Scenario): DataFrame = {
+    if (sourceAdapter.nonEmpty) {
+      return sourceAdapter.get.buildQuery(spark, scenarioValue.rows, scenarioValue.mappers,
+        scenarioValue.reducers, scenarioValue.payloadBytes)
+    }
     val range = if (scenarioValue.rows == 0L) {
       val schema = StructType(Seq(StructField("id", LongType, nullable = false)))
       val emptyRows = spark.sparkContext.parallelize(Seq.empty[Row], scenarioValue.mappers)
@@ -892,7 +907,10 @@ object ShuffleRecoveryColdProcessProcess {
       exchange: ShuffleExchangeExec,
       scenarioValue: Scenario,
       source: String): ShuffleRecoveryIdentityInputs = {
-    if (canonicalIdentityEnabled) {
+    if (sourceAdapter.nonEmpty) {
+      sourceAdapter.get.identityInputs(
+        exchange, source, ShuffleRecoveryFeasibilityIdentity.ProviderCompatibilityId)
+    } else if (canonicalIdentityEnabled) {
       ShuffleRecoveryCanonicalRangeInputs.build(
         exchange, source, ShuffleRecoveryFeasibilityIdentity.ProviderCompatibilityId)
     } else {
@@ -923,7 +941,7 @@ object ShuffleRecoveryColdProcessProcess {
     val warehouse = attemptRoot.resolve(s"warehouse-$name")
     Files.createDirectories(local)
     Files.createDirectories(warehouse)
-    SparkSession.builder()
+    val builder = SparkSession.builder()
       .master(sys.env.getOrElse("SPARK_SHUFFLE_RECOVERY_TEST_MASTER", "local[2]"))
       .appName(s"shuffle-recovery-cold-$name")
       .config("spark.ui.enabled", "false")
@@ -938,7 +956,10 @@ object ShuffleRecoveryColdProcessProcess {
       .config("spark.executor.cores", "1")
       .config("spark.local.dir", local.toString)
       .config("spark.sql.warehouse.dir", warehouse.toUri.toString)
-      .getOrCreate()
+    sourceAdapter.foreach { adapter =>
+      adapter.sessionOptions.foreach { case (key, value) => builder.config(key, value) }
+    }
+    builder.getOrCreate()
   }
 
   private def stopSpark(spark: SparkSession): Unit = {

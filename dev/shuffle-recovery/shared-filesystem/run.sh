@@ -54,6 +54,7 @@ stat -f -c '%T' "${mount_root}" | grep -Fx nfs
 
 export SPARK_SHUFFLE_RECOVERY_TEST_MASTER='local-cluster[2,1,1024]'
 export SPARK_SHUFFLE_RECOVERY_TEST_CANONICAL_IDENTITY=true
+export SPARK_SHUFFLE_RECOVERY_TEST_SOURCE_ADAPTER=org.apache.spark.shuffle.ShuffleRecoveryColdRangeSource
 export SPARK_SHUFFLE_RECOVERY_TEST_PRODUCER_FILTER=false
 export SPARK_SHUFFLE_RECOVERY_TEST_LOCAL_ROOT="${local_root}"
 # LocalSparkCluster creates worker directories beneath java.io.tmpdir. Standalone executors
@@ -110,6 +111,8 @@ def record(name):
     assert process['testedCommit'] == candidate, name
     assert process['master'] == 'local-cluster[2,1,1024]', name
     assert process['mode'] == row['role'], name
+    assert process['sourceAdapter'] == (
+        'org.apache.spark.shuffle.ShuffleRecoveryColdRangeSource'), name
     identity = (process['pid'], process['started'])
     assert identity not in processes, 'proof reused a child JVM'
     processes.add(identity)
