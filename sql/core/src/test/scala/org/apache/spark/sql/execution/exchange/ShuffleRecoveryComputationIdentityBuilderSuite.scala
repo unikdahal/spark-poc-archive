@@ -48,6 +48,7 @@ import org.apache.spark.sql.catalyst.plans.physical.{
   RangePartitioning,
   SinglePartition}
 import org.apache.spark.sql.catalyst.util.CollationFactory
+import org.apache.spark.sql.connector.catalog.{Table, TableCapability}
 import org.apache.spark.sql.connector.read.{Batch, HasPartitionKey, InputPartition, PartitionReader, PartitionReaderFactory, Scan}
 import org.apache.spark.sql.execution.{ProjectExec, RangeExec, SparkPlan}
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
@@ -501,7 +502,13 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
         }
       }
     }
-    BatchScanExec(Seq(AttributeReference("id", IntegerType)()), source, Nil, table = null)
+    val table = new Table {
+      override def name(): String = "certified-identity-test"
+      override def schema(): StructType = source.readSchema()
+      override def capabilities(): java.util.Set[TableCapability] =
+        java.util.Collections.singleton(TableCapability.BATCH_READ)
+    }
+    BatchScanExec(Seq(AttributeReference("id", IntegerType)()), source, Nil, table = table)
   }
 
   private def certifiedBuild(plan: BatchScanExec, binding: ShuffleRecoverySourceBinding)
