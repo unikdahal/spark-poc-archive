@@ -32,6 +32,7 @@ set -euo pipefail
 : "${CORE_RESULT:?}"
 : "${EXPECT_SQL:?}"
 : "${SQL_RESULT:?}"
+: "${ICEBERG_RESULT:?}"
 
 mkdir -p "${EVIDENCE_DIR}"
 {
@@ -48,6 +49,7 @@ mkdir -p "${EVIDENCE_DIR}"
   echo "core_compilation=${CORE_COMPILATION:-}"
   echo "core_tests=${CORE_TESTS:-}"
   echo "core_proof=${CORE_PROOF:-}"
+  echo "iceberg_job=${ICEBERG_RESULT}"
   echo "sql_job=${SQL_RESULT}"
   echo "sql_compilation=${SQL_COMPILATION:-}"
   echo "sql_tests=${SQL_TESTS:-}"
@@ -85,6 +87,7 @@ bash .github/scripts/shuffle-recovery-ci-evidence.sh checksum-tree "${EVIDENCE_D
 
 failed=false
 [[ "${PREFLIGHT_RESULT}" == success ]] || failed=true
+[[ "${ICEBERG_RESULT}" == success ]] || failed=true
 if [[ "${EXPECT_QUALITY}" == true ]]; then [[ "${QUALITY_RESULT}" == success ]] || failed=true; else [[ "${QUALITY_RESULT}" == skipped ]] || failed=true; fi
 if [[ "${EXPECT_CORE}" == true ]]; then [[ "${CORE_RESULT}" == success ]] || failed=true; else [[ "${CORE_RESULT}" == skipped ]] || failed=true; fi
 if [[ "${EXPECT_SQL}" == true ]]; then [[ "${SQL_RESULT}" == success ]] || failed=true; else [[ "${SQL_RESULT}" == skipped ]] || failed=true; fi

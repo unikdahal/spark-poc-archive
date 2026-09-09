@@ -342,9 +342,8 @@ jobs:
           SQL_COMPILATION: ${{ needs.sql.outputs.compilation }}
           SQL_TESTS: ${{ needs.sql.outputs.tests }}
           SQL_PROOF: ${{ needs.sql.outputs.proof }}
-        run: |
-          test '${{ needs.iceberg-resolved-scan.result }}' = success
-          bash .github/scripts/shuffle-recovery-ci-gate.sh
+          ICEBERG_RESULT: ${{ needs.iceberg-resolved-scan.result }}
+        run: bash .github/scripts/shuffle-recovery-ci-gate.sh
       - name: Upload final gate evidence
         if: always()
         uses: actions/upload-artifact@v7

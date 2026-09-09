@@ -554,6 +554,14 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
       requireExact(node.parameters.isEmpty, "filter operator parameters")
       requireExact(node.expressions.size == 1, "filter operator expression count")
       requireExact(node.children.size == 1, "filter operator child count")
+    case ShuffleRecoveryOperatorKind.CertifiedBatchSource =>
+      requireExact(node.parameters.isEmpty, "certified batch source parameters")
+      requireExact(node.children.isEmpty, "certified batch source children")
+      node.expressions.zipWithIndex.foreach { case (field, ordinal) =>
+        requireExact(field.kind == ShuffleRecoveryExpressionKind.Input &&
+          field.parameters == Vector(ShuffleRecoveryIntValue(ordinal)),
+          "certified batch source field ordinal")
+      }
     case ShuffleRecoveryOperatorKind.RangeSource =>
       requireExact(node.expressions.isEmpty, "range source expressions")
       requireExact(node.children.isEmpty, "range source children")

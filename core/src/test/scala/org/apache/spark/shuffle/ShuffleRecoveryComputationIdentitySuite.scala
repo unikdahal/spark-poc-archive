@@ -45,6 +45,21 @@ class ShuffleRecoveryComputationIdentitySuite extends SparkFunSuite {
     assert(identity.digest !== base.digest)
   }
 
+  test("certified batch sources reject non-leaf shapes and inconsistent field ordinals") {
+    val base = baseIdentity()
+    val source = ShuffleRecoveryOperatorNode(ShuffleRecoveryOperatorKind.CertifiedBatchSource,
+      Vector.empty, Vector(inputExpression(0)), Vector.empty)
+    val invalid = Seq(
+      source.copy(parameters = Vector(ShuffleRecoveryIntValue(1))),
+      source.copy(children = Vector(ShuffleRecoveryInlineOperator(base.producer))),
+      source.copy(expressions = Vector(inputExpression(1))))
+    invalid.foreach { producer =>
+      intercept[IllegalArgumentException] {
+        base.copy(producer = producer).canonicalPayload
+      }
+    }
+  }
+
   test("semantic field mutations change the canonical identity") {
     val base = baseIdentity()
     def changed(candidate: ShuffleRecoveryComputationIdentity): Unit = {
