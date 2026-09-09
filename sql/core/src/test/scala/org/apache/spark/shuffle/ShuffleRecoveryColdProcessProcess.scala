@@ -893,7 +893,8 @@ object ShuffleRecoveryColdProcessProcess {
       scenarioValue: Scenario,
       source: String): ShuffleRecoveryIdentityInputs = {
     if (canonicalIdentityEnabled) {
-      ShuffleRecoveryCanonicalRangeInputs.build(exchange, source)
+      ShuffleRecoveryCanonicalRangeInputs.build(
+        exchange, source, ShuffleRecoveryFeasibilityIdentity.ProviderCompatibilityId)
     } else {
       feasibility(scenarioValue, source)
     }

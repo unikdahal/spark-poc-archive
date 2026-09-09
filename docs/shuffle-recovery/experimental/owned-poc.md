@@ -16,6 +16,8 @@ manifest store and adoption-validation boundary. A versioned identity envelope r
 Phase 0 encoding and admits the bounded canonical encoding, including opaque source tokens and
 provider format IDs. Discovery compares the full payload after a digest lookup. Preparation checks
 that the supplied identity agrees with the current resolved inputs and dependency shape.
+The SQL builder takes the selected provider's read-format ID explicitly; it does not instantiate or
+choose a provider. A format change changes the identity even when the source and SQL plan agree.
 
 The shared-filesystem fixture now reconstructs a Range/Project/Shuffle computation in each child
 JVM and uses that canonical identity for publication and recovery. A changed producer filter must

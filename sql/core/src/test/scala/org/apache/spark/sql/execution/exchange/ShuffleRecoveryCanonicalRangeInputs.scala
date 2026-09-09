@@ -29,7 +29,10 @@ import org.apache.spark.sql.execution.RangeExec
  * path intended for connector certificates; it does not introduce a source-name switch in Core.
  */
 private[spark] object ShuffleRecoveryCanonicalRangeInputs {
-  def build(exchange: ShuffleExchangeExec, source: String): ShuffleRecoveryCanonicalInputs = {
+  def build(
+      exchange: ShuffleExchangeExec,
+      source: String,
+      providerReadFormatId: String): ShuffleRecoveryCanonicalInputs = {
     val ranges = exchange.child.collect { case range: RangeExec => range }
     require(ranges.size == 1, "canonical range proof requires exactly one Range source")
     val range = ranges.head
@@ -53,7 +56,8 @@ private[spark] object ShuffleRecoveryCanonicalRangeInputs {
         conf.getBoolean("spark.shuffle.compress", true),
         conf.get("spark.io.compression.codec", "lz4"),
         conf.getSizeAsBytes("spark.io.compression.lz4.blockSize", "32k").toInt,
-        conf.getBoolean("spark.io.encryption.enabled", false)))
+        conf.getBoolean("spark.io.encryption.enabled", false)),
+      providerReadFormatId)
     ShuffleRecoveryComputationIdentityBuilder.build(exchange, inputs) match {
       case ShuffleRecoveryIdentityBuilt(identity) => ShuffleRecoveryCanonicalInputs(identity)
       case ShuffleRecoveryIdentityRejected(reason) =>

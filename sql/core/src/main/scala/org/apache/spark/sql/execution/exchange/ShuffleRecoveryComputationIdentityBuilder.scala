@@ -130,7 +130,8 @@ private[sql] final class ShuffleRecoveryResolvedIdentityInputs private (
     private val sourceTokens: IdentityHashMap[SparkPlan, ShuffleRecoverySourceToken],
     val mapperDecomposition: ShuffleRecoveryMapperDecomposition,
     val resolvedValues: Map[String, ShuffleRecoveryCanonicalValue],
-    val semanticConfig: ShuffleRecoveryIdentitySemanticConfig) {
+    val semanticConfig: ShuffleRecoveryIdentitySemanticConfig,
+    val providerReadFormatId: String) {
 
   private[exchange] def sourceTokenFor(plan: SparkPlan): Option[ShuffleRecoverySourceToken] =
     Option(sourceTokens.get(plan))
@@ -141,12 +142,15 @@ private[sql] object ShuffleRecoveryResolvedIdentityInputs {
       sourceTokens: Seq[(SparkPlan, ShuffleRecoverySourceToken)],
       mapperDecomposition: ShuffleRecoveryMapperDecomposition,
       resolvedValues: Map[String, ShuffleRecoveryCanonicalValue],
-      semanticConfig: ShuffleRecoveryIdentitySemanticConfig)
+      semanticConfig: ShuffleRecoveryIdentitySemanticConfig,
+      providerReadFormatId: String)
       : ShuffleRecoveryResolvedIdentityInputs = {
     require(sourceTokens != null, "source token bindings must not be null")
     require(mapperDecomposition != null, "mapper decomposition must not be null")
     require(resolvedValues != null, "resolved values must not be null")
     require(semanticConfig != null, "semantic configuration must not be null")
+    require(providerReadFormatId != null && providerReadFormatId.nonEmpty,
+      "selected provider read format must not be empty")
     require(semanticConfig.sessionTimeZone != null && semanticConfig.sessionTimeZone.nonEmpty,
       "session time zone must not be empty")
     require(semanticConfig.shuffleCompressionCodec != null &&
@@ -164,7 +168,8 @@ private[sql] object ShuffleRecoveryResolvedIdentityInputs {
       bindings,
       mapperDecomposition,
       resolvedValues,
-      semanticConfig)
+      semanticConfig,
+      providerReadFormatId)
   }
 }
 
@@ -266,7 +271,6 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
   private val SerializerCompatibilityId = "unsafe-row-serializer-v1"
   private val CodecCompatibilityId = "spark-internal-row-v1"
   private val ShuffleWriteFormatId = "spark-sort-shuffle-unsafe-row-v1"
-  private val ProviderReadFormatId = "reference-shuffle-provider-v1"
   private val SupportedCompressionCodec = "lz4"
 
   private final class BuildContext(
@@ -328,7 +332,7 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
       val compatibility = ShuffleRecoveryCompatibility(
         ShuffleRecoveryComputationIdentity.SparkCompatibilityId,
         ShuffleWriteFormatId,
-        ProviderReadFormatId)
+        inputs.providerReadFormatId)
       val identity = ShuffleRecoveryComputationIdentity.create(
         outputContract,
         producer,

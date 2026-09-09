@@ -57,7 +57,8 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
 
   private case class BuildOverrides(
       encryptionEnabled: Boolean = false,
-      resolvedValues: Map[String, ShuffleRecoveryCanonicalValue] = Map.empty)
+      resolvedValues: Map[String, ShuffleRecoveryCanonicalValue] = Map.empty,
+      providerReadFormatId: String = "reference-shuffle-provider-v1")
 
   test("equivalent independently planned shuffles produce byte-identical identities") {
     val firstPlan = filteredRangePlan()
@@ -296,6 +297,18 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
       ShuffleRecoveryIdentityRejected(DeterminismUnproven))
   }
 
+  test("identity binds the selected provider format without choosing a provider implementation") {
+    val plan = projectedLiteralRange(7)
+    val first = build(hashExchange(plan), plan,
+      overrides = BuildOverrides(providerReadFormatId = "provider-a-format-v1"))
+    val second = build(hashExchange(plan), plan,
+      overrides = BuildOverrides(providerReadFormatId = "provider-b-format-v1"))
+    assert(first.compatibility.providerReadFormatId == "provider-a-format-v1")
+    assert(second.compatibility.providerReadFormatId == "provider-b-format-v1")
+    assert(first.canonicalPayload != second.canonicalPayload)
+    assert(first.digest != second.digest)
+  }
+
   test("missing source identity fails closed") {
     val plan = projectedLiteralRange(7)
     val exchange = hashExchange(plan)
@@ -303,7 +316,8 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
       Nil,
       decomposition(),
       Map.empty,
-      semanticConfig())
+      semanticConfig(),
+      "reference-shuffle-provider-v1")
 
     assert(ShuffleRecoveryComputationIdentityBuilder.build(exchange, inputs) ===
       ShuffleRecoveryIdentityRejected(SourceTokenUnavailable))
@@ -427,7 +441,8 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
         compressionEnabled,
         compressionCodec,
         compressionBlockSize,
-        overrides.encryptionEnabled))
+        overrides.encryptionEnabled),
+      overrides.providerReadFormatId)
     ShuffleRecoveryComputationIdentityBuilder.build(exchange, inputs)
   }
 
