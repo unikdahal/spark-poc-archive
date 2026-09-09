@@ -71,7 +71,7 @@ private[spark] final class ShuffleRecoverySchedulerAdoptionState(
       val dependency: ShuffleDependency[_, _, _],
       val mapperCount: Int,
       val reducerCount: Int,
-      val provider: ReferenceShuffleRecoveryClaimProvider,
+      val provider: ShuffleRecoveryBlockProvider,
       val binding: ShuffleRecoveryBinding,
       val preparedMaps: Vector[ShuffleRecoveryPreparedMap],
       val localBindingGeneration: Long,
@@ -82,7 +82,7 @@ private[spark] final class ShuffleRecoverySchedulerAdoptionState(
 
   private final class Adopted(
       val dependency: ShuffleDependency[_, _, _],
-      val provider: ReferenceShuffleRecoveryClaimProvider,
+      val provider: ShuffleRecoveryBlockProvider,
       val binding: ShuffleRecoveryBinding,
       val mapperCount: Int,
       val reducerCount: Int,
@@ -95,7 +95,7 @@ private[spark] final class ShuffleRecoverySchedulerAdoptionState(
       val retirementQueued: AtomicBoolean = new AtomicBoolean(false))
 
   private final class Invalidated(
-      val provider: ReferenceShuffleRecoveryClaimProvider,
+      val provider: ShuffleRecoveryBlockProvider,
       val binding: ShuffleRecoveryBinding,
       val localBindingGeneration: Long,
       val recoveredLocation: BlockManagerId,
@@ -163,7 +163,7 @@ private[spark] final class ShuffleRecoverySchedulerAdoptionState(
 
   def offerPrepared(
       prepared: PreparedShuffleRecoveryAdoption,
-      provider: ReferenceShuffleRecoveryClaimProvider,
+      provider: ShuffleRecoveryBlockProvider,
       location: BlockManagerId): Either[String, Unit] = {
     offerPrepared(prepared, provider, location, None)
   }
@@ -178,7 +178,7 @@ private[spark] final class ShuffleRecoverySchedulerAdoptionState(
    */
   def offerPrepared(
       prepared: PreparedShuffleRecoveryAdoption,
-      provider: ReferenceShuffleRecoveryClaimProvider,
+      provider: ShuffleRecoveryBlockProvider,
       location: BlockManagerId,
       retirer: Option[ShuffleRecoveryIncarnationRetirer]): Either[String, Unit] = {
     ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery scheduler preparation")
@@ -638,7 +638,7 @@ private[spark] final class ShuffleRecoverySchedulerAdoptionState(
 
   private def buildStatuses(
       prepared: PreparedShuffleRecoveryAdoption,
-      provider: ReferenceShuffleRecoveryClaimProvider,
+      provider: ShuffleRecoveryBlockProvider,
       location: BlockManagerId): Vector[MapStatus] = {
     if (prepared.maps.size != prepared.mapperCount) {
       throw new IllegalArgumentException("prepared adoption map count is inconsistent")
@@ -682,7 +682,7 @@ private[spark] final class ShuffleRecoverySchedulerAdoptionState(
   }
 
   private def safeRelease(
-      provider: ReferenceShuffleRecoveryClaimProvider,
+      provider: ShuffleRecoveryBlockProvider,
       binding: ShuffleRecoveryBinding): Unit = {
     try {
       provider.release(binding)
@@ -708,7 +708,7 @@ private[spark] final class ShuffleRecoverySchedulerAdoptionState(
   }
 
   private def releaseAsync(
-      provider: ReferenceShuffleRecoveryClaimProvider,
+      provider: ShuffleRecoveryBlockProvider,
       binding: ShuffleRecoveryBinding,
       queued: AtomicBoolean): Unit = {
     if (queued.compareAndSet(false, true)) {

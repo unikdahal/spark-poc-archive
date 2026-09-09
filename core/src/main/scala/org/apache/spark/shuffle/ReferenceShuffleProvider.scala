@@ -295,14 +295,12 @@ private[spark] final case class ReferenceShuffleOutputDescriptor(
 private[spark] final case class ReferenceShuffleBlockMetadata(
     offset: Long,
     length: Long,
-    checksum: Option[Long]) {
-  def isEmpty: Boolean = length == 0L
-}
+    checksum: Option[Long]) extends ShuffleRecoveryBlockMetadata
 
 private[spark] final class ReferenceShuffleResolvedMap(
     dataFile: Path,
     index: ReferenceShuffleMapIndex,
-    transportConf: TransportConf) {
+    transportConf: TransportConf) extends ShuffleRecoveryResolvedMap {
 
   def numReducers: Int = index.numReducers
 

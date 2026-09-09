@@ -22,6 +22,8 @@ import java.nio.ByteBuffer
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 
+import scala.util.control.NonFatal
+
 import org.apache.spark.{MapOutputTrackerMaster, ShuffleRecoverySchedulerAdoptionState, SparkConf}
 import org.apache.spark.SparkEnv
 import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
@@ -48,7 +50,7 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
   extends IndexShuffleBlockResolver(conf, null, taskIdMapsForShuffle) {
 
   private final class RecoveredReadBinding(
-      val provider: ReferenceShuffleRecoveryClaimProvider,
+      val provider: ShuffleRecoveryBlockProvider,
       val binding: ShuffleRecoveryBinding,
       val mapperCount: Int,
       val reducerCount: Int,
@@ -73,7 +75,7 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
 
   private[spark] def installRecoveredBinding(
       targetShuffleId: Int,
-      provider: ReferenceShuffleRecoveryClaimProvider,
+      provider: ShuffleRecoveryBlockProvider,
       binding: ShuffleRecoveryBinding,
       mapperCount: Int,
       reducerCount: Int,
@@ -203,9 +205,9 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
   }
 
   private[spark] def openBoundMapForPreparation(
-      provider: ReferenceShuffleRecoveryClaimProvider,
+      provider: ShuffleRecoveryBlockProvider,
       binding: ShuffleRecoveryBinding,
-      mapIndex: Int): ReferenceShuffleResolvedMap = {
+      mapIndex: Int): ShuffleRecoveryResolvedMap = {
     provider.openBoundMap(binding, mapIndex)
   }
 
@@ -249,12 +251,22 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
       throw new IOException("recovered shuffle block coordinates are outside the binding")
     }
 
-    val resolved = recovered.provider.openBoundMapForFetch(
-      recovered.binding, mapIndex, recovered.maps(mapIndex)) match {
-      case ShuffleRecoveryBoundMapOpened(value) => value
+    val opened = try {
+      recovered.provider.openBoundMapForFetch(
+        recovered.binding, mapIndex, recovered.maps(mapIndex))
+    } catch {
+      case NonFatal(error) =>
+        recordFailure(id, recovered, ShuffleRecoveryAdoptedUnavailable)
+        throw new IOException("adopted shuffle provider failed to open a map", error)
+    }
+    val resolved = opened match {
+      case ShuffleRecoveryBoundMapOpened(value) if value != null => value
       case ShuffleRecoveryBoundMapFailed(failureClass) =>
         recordFailure(id, recovered, failureClass)
         throw new IOException(s"adopted shuffle provider read failed: $failureClass")
+      case _ =>
+        recordFailure(id, recovered, ShuffleRecoveryAdoptedUnavailable)
+        throw new IOException("adopted shuffle provider returned no map result")
     }
     if (resolved.numReducers != recovered.reducerCount) {
       recordFailure(id, recovered, ShuffleRecoveryAdoptedCorrupt)
@@ -262,11 +274,16 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
     }
 
     val metadata = try {
-      resolved.blockMetadata(id.reduceId)
+      val block = resolved.blockMetadata(id.reduceId)
+      require(block != null, "adopted shuffle block metadata is null")
+      block
     } catch {
       case _: IllegalArgumentException =>
         recordFailure(id, recovered, ShuffleRecoveryAdoptedCorrupt)
         throw new IOException("adopted shuffle block metadata is corrupt")
+      case NonFatal(error) =>
+        recordFailure(id, recovered, ShuffleRecoveryAdoptedUnavailable)
+        throw new IOException("adopted shuffle block metadata is unavailable", error)
     }
     if (metadata.offset < 0L || metadata.length < 0L ||
         metadata.offset > resolved.dataLength ||
@@ -275,11 +292,41 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
       throw new IOException("adopted shuffle block range is corrupt")
     }
 
-    // Invalidation wins over a read that started earlier. A task that already received a buffer is
-    // fenced at scheduler completion; one still inside this resolver is prevented from receiving A.
+    val read = try {
+      resolved.getBlockData(id.reduceId)
+    } catch {
+      case NonFatal(error) =>
+        recordFailure(id, recovered, ShuffleRecoveryAdoptedUnavailable)
+        throw new IOException("adopted shuffle provider failed to open a block", error)
+    }
+    val buffer = read match {
+      case Some(value) if value != null => value
+      case None if metadata.isEmpty => new NioManagedBuffer(ByteBuffer.allocate(0))
+      case _ =>
+        recordFailure(id, recovered, ShuffleRecoveryAdoptedCorrupt)
+        throw new IOException("adopted shuffle provider omitted a nonempty block")
+    }
+    val length = try {
+      buffer.size()
+    } catch {
+      case NonFatal(error) =>
+        recordFailure(id, recovered, ShuffleRecoveryAdoptedUnavailable)
+        try buffer.release() finally {
+          throw new IOException("adopted shuffle buffer size is unavailable", error)
+        }
+    }
+    if (length != metadata.length) {
+      recordFailure(id, recovered, ShuffleRecoveryAdoptedCorrupt)
+      try buffer.release() finally {
+        throw new IOException("adopted shuffle buffer length disagrees with metadata")
+      }
+    }
+    // Check after buffer acquisition as well: a provider call may race binding invalidation.
     if (!recovered.usable.get()) {
       recordFailure(id, recovered, ShuffleRecoveryAdoptedUnavailable)
-      throw new IOException("recovered shuffle binding was invalidated during fetch")
+      try buffer.release() finally {
+        throw new IOException("recovered shuffle binding was invalidated during fetch")
+      }
     }
 
     val counters = recoveredReadCounters.get(id.shuffleId)
@@ -292,9 +339,7 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
         counters.bytesRead.addAndGet(metadata.length)
       }
     }
-    resolved.getBlockData(id.reduceId).getOrElse {
-      new NioManagedBuffer(ByteBuffer.allocate(0))
-    }
+    buffer
   }
 
   private def recordFailure(

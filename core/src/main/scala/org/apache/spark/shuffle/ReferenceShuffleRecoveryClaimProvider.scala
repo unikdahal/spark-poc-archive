@@ -37,7 +37,7 @@ import org.apache.spark.SparkConf
  */
 private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     providerRoot: Path,
-    conf: SparkConf = new SparkConf(false)) extends ShuffleRecoveryClaimProvider {
+    conf: SparkConf = new SparkConf(false)) extends ShuffleRecoveryBlockProvider {
 
   import ReferenceShuffleRecoveryClaimProvider._
 
@@ -118,7 +118,7 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     }
   }
 
-  private[shuffle] def openBoundMap(
+  override private[shuffle] def openBoundMap(
       binding: ShuffleRecoveryBinding,
       mapIndex: Int): ReferenceShuffleResolvedMap = {
     ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery bound map open")
@@ -139,7 +139,7 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
    * failure is deliberately classified as unavailable unless a fresh examination proves that the
    * immutable winner, data, or exact index is missing or has changed.
    */
-  private[shuffle] def openBoundMapForFetch(
+  override private[shuffle] def openBoundMapForFetch(
       binding: ShuffleRecoveryBinding,
       mapIndex: Int,
       expected: ShuffleRecoveryPreparedMap): ShuffleRecoveryBoundMapReadResult = {

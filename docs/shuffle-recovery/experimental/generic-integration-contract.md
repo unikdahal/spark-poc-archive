@@ -169,3 +169,19 @@ This real snapshot change is separate from the synthetic source-token discrimina
 This new Iceberg proof uses local executors and the reference provider. It does not prove
 Celeborn retention, remote Iceberg executors, production storage semantics, or automatic
 query integration. CI preserves raw child logs, result evidence, and both snapshot IDs.
+
+### Block-provider integration path
+
+`ShuffleRecoveryBlockProvider` now separates scheduler adoption and recovered-block resolution
+from the concrete reference claim provider. Implementations supply claim/release and fenced
+bound-map views through `ShuffleRecoveryResolvedMap`; the reference provider implements this
+contract. A map exposes logical block offsets, exact sizes, and managed buffers without
+requiring callers to know a local file path. Buffer ownership transfers to the reader.
+The resolver rejects missing nonempty blocks and length mismatches and releases buffers
+when invalidation wins during acquisition. These implementation changes await batch validation.
+
+This is still the existing block-addressed compatibility path. Claim metadata still includes
+exact index information, scheduler installation still reconstructs map statuses, and reads
+still pass through the replacement driver's block resolver. It does not yet provide a compact
+executor descriptor, provider retention lease renewal, or direct Celeborn reads. Implementing
+this interface alone must not be reported as completing the native provider protocol.

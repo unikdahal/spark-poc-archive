@@ -54,7 +54,7 @@ private[spark] final case class ShuffleRecoveryObservedFetchFailure(
 private[shuffle] sealed trait ShuffleRecoveryBoundMapReadResult
 
 private[shuffle] final case class ShuffleRecoveryBoundMapOpened(
-    map: ReferenceShuffleResolvedMap) extends ShuffleRecoveryBoundMapReadResult
+    map: ShuffleRecoveryResolvedMap) extends ShuffleRecoveryBoundMapReadResult
 
 private[shuffle] final case class ShuffleRecoveryBoundMapFailed(
     failureClass: ShuffleRecoveryAdoptedReadFailureClass)
