@@ -81,7 +81,13 @@ only the unconditional schema-evolution identity assertion; the corrected requir
 Candidate `84f72b10c972490e4af78542197b1c579c9b5cca` also passed the complete gate in
 [run 34276458479](https://github.com/unikdahal/spark/actions/runs/34276458479), including row-delete
 refusal, shared-filesystem negative controls, child provenance and scratch isolation. The subsequent
-canonical-manifest integration requires its own exact-candidate validation. No production authorization,
+canonical-manifest integration passed in
+[run 34316394901](https://github.com/unikdahal/spark/actions/runs/34316394901) for candidate
+`4aa9889f9350bad49f9b873d1ec9017a281c5cfa`. Its canonical NFS replacement ran zero map tasks and
+read 1,152 provider bytes. Source-token, missing-artifact and producer-filter controls each ran four
+map tasks, read no provider bytes and returned the same 32 rows and digest as the baseline. Core
+also passed the canonical manifest and alternate provider-format metadata tests. The later change
+making the selected provider format an explicit SQL-builder input requires its own validation. No production authorization,
 AQE recovery, performance or SPIP acceptance claim follows from the completed checks. Ordinary
 latest-source resolution and ordinary errors remain authoritative.
 

@@ -69,7 +69,22 @@ must not be an implicit fallback.
 4. Exercise the same contract tests with a second source/provider fixture to detect hidden coupling.
 5. Prove late-failure invalidation and AQE behavior, then measure first-attempt cost and recovery value.
 
-The first item is now implemented and under exact-candidate CI validation. Items two through five
+The first item passed for candidate `4aa9889f9350bad49f9b873d1ec9017a281c5cfa` in
+[run 34316394901](https://github.com/unikdahal/spark/actions/runs/34316394901). The subsequent
+provider-format input refinement requires its own exact-candidate validation. Items two through five
 remain outstanding. The provider-selected format ID is an explicit SQL-builder input; the manifest
 identity envelope preserves complete canonical bytes and supports opaque connector tokens. These
 changes do not by themselves finish a generic public SPI or a Celeborn-backed recovery deployment.
+
+## Iceberg planning constraint for the next adapter
+
+The existing spike captures a planning event while forcing the query's actual scan planning.
+Calling it after a caller has already materialized that plan may produce no event and must remain
+unsupported. The integration must arrange the capture before planning, or obtain a certificate
+retained by the connector alongside its planned tasks.
+
+Reading a mutable table's current snapshot after planning is not an adequate replacement. The
+[pinned SnapshotScan implementation](https://github.com/apache/iceberg/blob/e76d63584d7f83b102026749e1ae0f91813cb78e/core/src/main/java/org/apache/iceberg/SnapshotScan.java)
+resolves an unspecified snapshot through the table's current metadata. That getter does not itself
+prove which snapshot produced an already cached task list. The adapter must bind the certificate
+to the read already planned, not perform another latest-snapshot resolution.
