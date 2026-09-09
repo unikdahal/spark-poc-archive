@@ -31,6 +31,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{
   Alias,
   Ascending,
+  AttributeReference,
   EvalMode,
   Expression,
   Literal,
@@ -45,9 +46,11 @@ import org.apache.spark.sql.catalyst.plans.physical.{
   RangePartitioning,
   SinglePartition}
 import org.apache.spark.sql.catalyst.util.CollationFactory
+import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReaderFactory, Scan}
 import org.apache.spark.sql.execution.{ProjectExec, RangeExec, SparkPlan}
+import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 import org.apache.spark.sql.test.SharedSparkSession
-import org.apache.spark.sql.types.{IntegerType, MetadataBuilder, StringType}
+import org.apache.spark.sql.types.{IntegerType, MetadataBuilder, StringType, StructType}
 import org.apache.spark.unsafe.types.UTF8String
 
 class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession {
@@ -59,6 +62,73 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
       encryptionEnabled: Boolean = false,
       resolvedValues: Map[String, ShuffleRecoveryCanonicalValue] = Map.empty,
       providerReadFormatId: String = "reference-shuffle-provider-v1")
+
+  test("certified batch identities survive replanning but distinguish source and split facts") {
+    def identity(protocol: String, certificate: Byte, descriptor: Byte)
+        : ShuffleRecoveryComputationIdentity = {
+      val plan = batchPlan()
+      val binding = ShuffleRecoverySourceBinding.bind(plan, protocol, 1, Array(certificate),
+        plan.inputPartitions.toVector.map(_ -> Array(descriptor))).toOption.get
+      certifiedBuild(plan, binding) match {
+        case ShuffleRecoveryIdentityBuilt(result) => result
+        case other => fail(s"expected certified identity, got $other")
+      }
+    }
+    val first = identity("example.source", 1, 2)
+    assert(first.canonicalPayload === identity("example.source", 1, 2).canonicalPayload)
+    assert(first.digest !== identity("other.source", 1, 2).digest)
+    assert(first.digest !== identity("example.source", 3, 2).digest)
+    assert(first.digest !== identity("example.source", 1, 4).digest)
+  }
+
+  test("source bindings require exact plan and partition objects and own descriptor bytes") {
+    val plan = batchPlan()
+    val descriptor = Array[Byte](1)
+    val certificate = Array[Byte](2)
+    val entries = plan.inputPartitions.toVector.map(_ -> descriptor)
+    val binding = ShuffleRecoverySourceBinding.bind(
+      plan, "example.source", 1, certificate, entries).toOption.get
+    val before = certifiedBuild(plan, binding)
+    descriptor(0) = 9
+    certificate(0) = 9
+    assert(certifiedBuild(plan, binding) === before)
+    assert(certifiedBuild(plan.copy(), binding) ===
+      ShuffleRecoveryIdentityRejected(SourceTokenUnavailable))
+    val lookalikes = entries.map { case (_, bytes) => new InputPartition {} -> bytes }
+    assert(ShuffleRecoverySourceBinding.bind(
+      plan, "example.source", 1, certificate, lookalikes) === Left(SourceTokenUnavailable))
+    assert(ShuffleRecoverySourceBinding.bind(
+      plan, "example.source", 1, certificate, entries.reverse) === Left(SourceTokenUnavailable))
+  }
+
+  test("uncertified batch scans and unsupported partition layouts refuse identity") {
+    val plan = batchPlan()
+    val inputs = ShuffleRecoveryResolvedIdentityInputs.create(
+      Seq(plan -> ShuffleRecoverySourceToken.forProtocol("example.source", 1, Array[Byte](1))),
+      decomposition(), Map.empty, semanticConfig(), "test-provider-v1")
+    assert(ShuffleRecoveryComputationIdentityBuilder.build(hashExchange(plan), inputs) ===
+      ShuffleRecoveryIdentityRejected(SourceTokenUnavailable))
+    val entries = plan.inputPartitions.toVector.map(_ -> Array[Byte](1))
+    assert(ShuffleRecoverySourceBinding.bind(plan.copy(runtimeFilters = Seq(Literal(true))),
+      "example.source", 1, Array[Byte](1), entries) === Left(RuntimeFilterPresent))
+    assert(ShuffleRecoverySourceBinding.bind(plan.copy(keyGroupedPartitioning = Some(Nil)),
+      "example.source", 1, Array[Byte](1), entries) === Left(UnsupportedPartitioning))
+    assert(ShuffleRecoverySourceBinding.bind(plan, "example.source", 1, Array[Byte](1),
+      entries.take(1)) === Left(InvalidPartitionCount))
+    assert(ShuffleRecoverySourceBinding.bind(plan, "example.source", 1, Array[Byte](1),
+      entries.map { case (part, _) => part -> new Array[Byte](65537) }) ===
+      Left(SourceTokenUnavailable))
+  }
+
+  test("ordinary source planning failures are not converted to certification misses") {
+    val failure = new IllegalStateException("source planning failed")
+    val plan = batchPlan(Some(failure))
+    val thrown = intercept[IllegalStateException] {
+      ShuffleRecoverySourceBinding.bind(plan, "example.source", 1, Array[Byte](1),
+        Vector(new InputPartition {} -> Array[Byte](1)))
+    }
+    assert(thrown eq failure)
+  }
 
   test("equivalent independently planned shuffles produce byte-identical identities") {
     val firstPlan = filteredRangePlan()
@@ -359,6 +429,27 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
 
     assert(buildResult(exchange, plan) ===
       ShuffleRecoveryIdentityRejected(UnsupportedExpression))
+  }
+
+  private def batchPlan(failure: Option[RuntimeException] = None): BatchScanExec = {
+    val source = new Scan with Batch {
+      override def readSchema(): StructType = new StructType().add("id", IntegerType)
+      override def toBatch: Batch = this
+      override def planInputPartitions(): Array[InputPartition] = {
+        failure.foreach(error => throw error)
+        Array(new InputPartition {}, new InputPartition {})
+      }
+      override def createReaderFactory(): PartitionReaderFactory =
+        throw new UnsupportedOperationException("identity tests do not read partitions")
+    }
+    BatchScanExec(Seq(AttributeReference("id", IntegerType)()), source, Nil, table = null)
+  }
+
+  private def certifiedBuild(plan: BatchScanExec, binding: ShuffleRecoverySourceBinding)
+      : ShuffleRecoveryIdentityBuildResult = {
+    val inputs = ShuffleRecoveryResolvedIdentityInputs.create(
+      Nil, binding.decomposition, Map.empty, semanticConfig(), "test-provider-v1", Some(binding))
+    ShuffleRecoveryComputationIdentityBuilder.build(hashExchange(plan), inputs)
   }
 
   private def rangePlan(): SparkPlan =

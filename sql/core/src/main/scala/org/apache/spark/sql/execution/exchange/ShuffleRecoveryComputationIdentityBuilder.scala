@@ -70,12 +70,14 @@ import org.apache.spark.sql.catalyst.plans.physical.{
   RangePartitioning,
   SinglePartition}
 import org.apache.spark.sql.execution.{
+  ColumnarToRowExec,
   FilterExec,
   InputAdapter,
   ProjectExec,
   RangeExec,
   SparkPlan,
   WholeStageCodegenExec}
+import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 import org.apache.spark.sql.types.{
   BinaryType,
   BooleanType,
@@ -131,10 +133,15 @@ private[sql] final class ShuffleRecoveryResolvedIdentityInputs private (
     val mapperDecomposition: ShuffleRecoveryMapperDecomposition,
     val resolvedValues: Map[String, ShuffleRecoveryCanonicalValue],
     val semanticConfig: ShuffleRecoveryIdentitySemanticConfig,
-    val providerReadFormatId: String) {
+    val providerReadFormatId: String,
+    private val certifiedSource: Option[ShuffleRecoverySourceBinding]) {
 
   private[exchange] def sourceTokenFor(plan: SparkPlan): Option[ShuffleRecoverySourceToken] =
     Option(sourceTokens.get(plan))
+
+  private[exchange] def certifiedSourceFor(
+      plan: BatchScanExec): Option[ShuffleRecoverySourceBinding] =
+    certifiedSource.filter(_.isCurrent(plan))
 }
 
 private[sql] object ShuffleRecoveryResolvedIdentityInputs {
@@ -143,12 +150,20 @@ private[sql] object ShuffleRecoveryResolvedIdentityInputs {
       mapperDecomposition: ShuffleRecoveryMapperDecomposition,
       resolvedValues: Map[String, ShuffleRecoveryCanonicalValue],
       semanticConfig: ShuffleRecoveryIdentitySemanticConfig,
-      providerReadFormatId: String)
+      providerReadFormatId: String,
+      certifiedSource: Option[ShuffleRecoverySourceBinding] = None)
       : ShuffleRecoveryResolvedIdentityInputs = {
     require(sourceTokens != null, "source token bindings must not be null")
     require(mapperDecomposition != null, "mapper decomposition must not be null")
     require(resolvedValues != null, "resolved values must not be null")
     require(semanticConfig != null, "semantic configuration must not be null")
+    require(certifiedSource != null, "certified source option must not be null")
+    certifiedSource.foreach { source =>
+      require(source != null && source.isCurrent(source.plan),
+        "source binding is no longer current")
+      require(sourceTokens.isEmpty && mapperDecomposition == source.decomposition,
+        "certified source must supply the complete source and mapper identity")
+    }
     require(providerReadFormatId != null && providerReadFormatId.nonEmpty,
       "selected provider read format must not be empty")
     require(semanticConfig.sessionTimeZone != null && semanticConfig.sessionTimeZone.nonEmpty,
@@ -169,7 +184,8 @@ private[sql] object ShuffleRecoveryResolvedIdentityInputs {
       mapperDecomposition,
       resolvedValues,
       semanticConfig,
-      providerReadFormatId)
+      providerReadFormatId,
+      certifiedSource)
   }
 }
 
@@ -188,6 +204,8 @@ private[sql] object ShuffleRecoveryComputationIdentityPolicy {
     classOf[ProjectExec].getName,
     classOf[FilterExec].getName,
     classOf[RangeExec].getName,
+    classOf[BatchScanExec].getName,
+    classOf[ColumnarToRowExec].getName,
     classOf[WholeStageCodegenExec].getName,
     classOf[InputAdapter].getName)
 
@@ -266,7 +284,7 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
   private val MaxCompressionBlockBytes = 16 * 1024 * 1024
   private val HashSeed = 42
   private val HashCompatibilityId = "spark-murmur3-32-seed-42-v1"
-  private val CanonicalSqlEncoderVersion = "spark-sql-canonical-encoder-v3"
+  private val CanonicalSqlEncoderVersion = "spark-sql-canonical-encoder-v4"
   private val RowEncodingVersion = "unsafe-row-v1"
   private val SerializerCompatibilityId = "unsafe-row-serializer-v1"
   private val CodecCompatibilityId = "spark-internal-row-v1"
@@ -401,6 +419,9 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
         case wrapper: InputAdapter =>
           buildOperator(wrapper.child, context, depth + 1)
 
+        case wrapper: ColumnarToRowExec =>
+          buildOperator(wrapper.child, context, depth + 1)
+
         case project: ProjectExec =>
           val ordinals = inputOrdinals(project.child.output)
           val expressions = project.projectList.map { expression =>
@@ -422,6 +443,24 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
             Vector(condition),
             Vector(ShuffleRecoveryInlineOperator(
               buildOperator(filter.child, context, depth + 1))))
+
+        case scan: BatchScanExec =>
+          val binding = context.inputs.certifiedSourceFor(scan).getOrElse {
+            fail(SourceTokenUnavailable)
+          }
+          if (context.sourceTokens.nonEmpty ||
+              binding.decomposition != context.inputs.mapperDecomposition) {
+            fail(InvalidPartitionCount)
+          }
+          buildOutputContract(scan.output)
+          val ordinals = inputOrdinals(scan.output)
+          val fields = scan.output.map(buildExpression(_, ordinals, context, depth + 1)).toVector
+          context.sourceTokens += binding.token
+          ShuffleRecoveryOperatorNode(
+            ShuffleRecoveryOperatorKind.CertifiedBatchSource,
+            Vector.empty,
+            fields,
+            Vector.empty)
 
         case range: RangeExec =>
           val token = context.inputs.sourceTokenFor(range).getOrElse {

@@ -102,3 +102,22 @@ Reading a mutable table's current snapshot after planning is not an adequate rep
 resolves an unspecified snapshot through the table's current metadata. That getter does not itself
 prove which snapshot produced an already cached task list. The adapter must bind the certificate
 to the read already planned, not perform another latest-snapshot resolution.
+
+### Binding certificates to planned batch reads
+
+The internal `ShuffleRecoverySourceBinding` adapter associates a protocol certificate and
+ordered split descriptors with one `BatchScanExec` and its exact `InputPartition` objects.
+The canonical builder admits that batch source only through this binding. A raw source token
+alone does not certify a batch scan. Object identities are local validation facts and never
+enter persisted identity bytes, so equivalent independently planned reads can still match.
+
+The initial adapter refuses runtime filters, grouped partitions, empty reads, mismatched
+partition objects, and oversized descriptors. It copies certificate and descriptor bytes.
+Ordinary partition-planning exceptions propagate. A connector must still guarantee that
+its certificate describes the actual planned read and that partition semantics remain
+immutable: object identity cannot establish either guarantee on its own.
+
+This is an internal single-source integration boundary, not a released connector API.
+Automatic Iceberg certificate capture, publication/recovery wiring, and Celeborn-native
+retention and reads remain outstanding. SQL canonical encoding advances to v4 for this
+additional source operator; previous SQL identities conservatively miss.

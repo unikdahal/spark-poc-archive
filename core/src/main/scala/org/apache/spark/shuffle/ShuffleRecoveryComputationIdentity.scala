@@ -125,11 +125,13 @@ private[spark] object ShuffleRecoveryOperatorKind {
   case object Project extends ShuffleRecoveryOperatorKind { override val tag: Int = 1 }
   case object Filter extends ShuffleRecoveryOperatorKind { override val tag: Int = 2 }
   case object RangeSource extends ShuffleRecoveryOperatorKind { override val tag: Int = 3 }
+  case object CertifiedBatchSource extends ShuffleRecoveryOperatorKind { override val tag: Int = 4 }
 
   private[shuffle] def fromTag(tag: Int): ShuffleRecoveryOperatorKind = tag match {
     case Project.tag => Project
     case Filter.tag => Filter
     case RangeSource.tag => RangeSource
+    case CertifiedBatchSource.tag => CertifiedBatchSource
     case _ => throw new IOException(s"unknown recovery operator tag: $tag")
   }
 }

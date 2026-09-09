@@ -35,6 +35,16 @@ class ShuffleRecoveryComputationIdentitySuite extends SparkFunSuite {
     assert(ShuffleRecoveryComputationIdentityCodec.decode(payload) === identity)
   }
 
+  test("certified batch source operator survives canonical encoding") {
+    val base = baseIdentity()
+    val identity = base.copy(producer = ShuffleRecoveryOperatorNode(
+      ShuffleRecoveryOperatorKind.CertifiedBatchSource,
+      Vector.empty, Vector(inputExpression(0)), Vector.empty))
+    assert(ShuffleRecoveryComputationIdentityCodec.decode(
+      identity.canonicalPayload.toArray) === identity)
+    assert(identity.digest !== base.digest)
+  }
+
   test("semantic field mutations change the canonical identity") {
     val base = baseIdentity()
     def changed(candidate: ShuffleRecoveryComputationIdentity): Unit = {
