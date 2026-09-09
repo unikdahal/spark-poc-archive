@@ -54,6 +54,7 @@ stat -f -c '%T' "${mount_root}" | grep -Fx nfs
 
 export SPARK_SHUFFLE_RECOVERY_TEST_MASTER='local-cluster[2,1,1024]'
 export SPARK_SHUFFLE_RECOVERY_TEST_CANONICAL_IDENTITY=true
+export SPARK_SHUFFLE_RECOVERY_TEST_PRODUCER_FILTER=false
 export SPARK_SHUFFLE_RECOVERY_TEST_LOCAL_ROOT="${local_root}"
 # LocalSparkCluster creates worker directories beneath java.io.tmpdir. Standalone executors
 # honor SPARK_LOCAL_DIRS before spark.local.dir; isolate both so the purge covers all scratch.
