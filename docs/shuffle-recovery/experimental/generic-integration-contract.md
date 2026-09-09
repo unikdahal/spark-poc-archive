@@ -185,3 +185,11 @@ exact index information, scheduler installation still reconstructs map statuses,
 still pass through the replacement driver's block resolver. It does not yet provide a compact
 executor descriptor, provider retention lease renewal, or direct Celeborn reads. Implementing
 this interface alone must not be reported as completing the native provider protocol.
+
+The provider-side implementation is maintained on
+[`unikdahal/celeborn`, `spip/retained-shuffle-poc`](https://github.com/unikdahal/celeborn/tree/spip/retained-shuffle-poc).
+Its initial bounded lifecycle leases fence delayed cleanup. They are process-local and
+must be owned by a lifecycle service independent of Spark attempts before they provide
+cross-driver retention. Spark's reference provider now wraps opened map views with a
+live-binding check, including buffer release when the binding expires during acquisition.
+Both changes remain unvalidated pending the combined implementation batch.

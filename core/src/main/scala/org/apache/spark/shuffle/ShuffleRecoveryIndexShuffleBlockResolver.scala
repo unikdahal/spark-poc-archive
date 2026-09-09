@@ -268,15 +268,12 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
         recordFailure(id, recovered, ShuffleRecoveryAdoptedUnavailable)
         throw new IOException("adopted shuffle provider returned no map result")
     }
-    if (resolved.numReducers != recovered.reducerCount) {
-      recordFailure(id, recovered, ShuffleRecoveryAdoptedCorrupt)
-      throw new IOException("adopted shuffle reducer shape changed after validation")
-    }
-
-    val metadata = try {
+    val (metadata, dataLength) = try {
+      require(resolved.numReducers == recovered.reducerCount,
+        "adopted shuffle reducer shape changed after validation")
       val block = resolved.blockMetadata(id.reduceId)
       require(block != null, "adopted shuffle block metadata is null")
-      block
+      (block, resolved.dataLength)
     } catch {
       case _: IllegalArgumentException =>
         recordFailure(id, recovered, ShuffleRecoveryAdoptedCorrupt)
@@ -286,8 +283,8 @@ private[spark] final class ShuffleRecoveryIndexShuffleBlockResolver(
         throw new IOException("adopted shuffle block metadata is unavailable", error)
     }
     if (metadata.offset < 0L || metadata.length < 0L ||
-        metadata.offset > resolved.dataLength ||
-        metadata.length > resolved.dataLength - metadata.offset) {
+        metadata.offset > dataLength ||
+        metadata.length > dataLength - metadata.offset) {
       recordFailure(id, recovered, ShuffleRecoveryAdoptedCorrupt)
       throw new IOException("adopted shuffle block range is corrupt")
     }

@@ -120,7 +120,7 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
 
   override private[shuffle] def openBoundMap(
       binding: ShuffleRecoveryBinding,
-      mapIndex: Int): ReferenceShuffleResolvedMap = {
+      mapIndex: Int): ShuffleRecoveryResolvedMap = {
     ShuffleRecoveryExternalCallGuard.assertAllowed("shuffle recovery bound map open")
     if (binding == null) {
       throw new IllegalArgumentException("shuffle recovery binding must not be null")
@@ -129,7 +129,7 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
     if (active == null || active.binding != binding) {
       throw new IOException("shuffle recovery binding is not active")
     }
-    active.provider.openMap(mapIndex)
+    new ShuffleRecoveryFencedMap(active.provider.openMap(mapIndex), () => isBound(binding))
   }
 
   /**
@@ -177,7 +177,8 @@ private[spark] final class ReferenceShuffleRecoveryClaimProvider(
         resolved.indexBytes != expected.indexLength) {
       ShuffleRecoveryBoundMapFailed(ShuffleRecoveryAdoptedCorrupt)
     } else {
-      ShuffleRecoveryBoundMapOpened(resolved)
+      ShuffleRecoveryBoundMapOpened(
+        new ShuffleRecoveryFencedMap(resolved, () => isBound(binding)))
     }
   }
 
