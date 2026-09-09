@@ -20,6 +20,8 @@ Certification observes the same resolved scan and ordered input partitions used 
 query. It must not independently resolve a table name, substitute an older snapshot, or create a
 second planning result. The certificate binds opaque versioned source facts to the exact mapper
 decomposition. Spark adds the reviewed SQL producer, output and shuffle-partitioning semantics.
+The connector binding must also identify the certification protocol and version, so unrelated
+connectors cannot accidentally equate identical opaque bytes. A token is not a provider locator.
 
 The connector either provides immutable bounded facts or explicitly refuses certification. Normal
 source resolution and authorization happen first; their failures retain ordinary query semantics.
