@@ -118,6 +118,16 @@ its certificate describes the actual planned read and that partition semantics r
 immutable: object identity cannot establish either guarantee on its own.
 
 This is an internal single-source integration boundary, not a released connector API.
-Automatic Iceberg certificate capture, publication/recovery wiring, and Celeborn-native
-retention and reads remain outstanding. SQL canonical encoding advances to v4 for this
+The out-of-tree Iceberg conformance adapter now feeds actual planned scans into this
+binding and the canonical SQL builder. Automatic publication/recovery wiring and
+Celeborn-native retention and reads remain outstanding. SQL canonical encoding advances to v4 for this
 additional source operator; previous SQL identities conservatively miss.
+
+The Iceberg bridge checks that each Spark input partition owns the exact cached Iceberg
+task-group object certified in that ordinal. Its split descriptor includes the complete
+ordered decomposition digest and ordinal. Conformance compares independent planning,
+snapshot advancement, and a pinned older snapshot at a real hash-shuffle boundary, with
+exact result checks. Merely implementing `HasPartitionKey` does not mean a read is grouped;
+the binding rejects planned grouping through `BatchScanExec.keyGroupedPartitioning`.
+This distinction matters because the pinned Iceberg partition implementation exposes that
+interface even for ungrouped reads.

@@ -62,8 +62,10 @@ import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.execution.SparkPlan;
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec;
+import org.apache.spark.sql.execution.exchange.ShuffleRecoveryIcebergIdentityBridge;
 
 /**
  * Out-of-tree feasibility adapter for certifying the exact Apache Iceberg batch scan planned by
@@ -185,6 +187,15 @@ public final class ShuffleRecoveryIcebergSourceSpike {
         "same resolved snapshot did not reproduce the same identity");
     require(checkedRows(repeatedLatest1, 0L, 256L) == 256L, "repeated snapshot 1 result changed");
 
+    Dataset<Row> firstShuffle = shuffledProjection(latestProjection(spark));
+    String firstShuffleIdentity = canonicalIdentity(firstShuffle);
+    Dataset<Row> repeatedShuffle = shuffledProjection(latestProjection(spark));
+    require(firstShuffleIdentity.equals(canonicalIdentity(repeatedShuffle)),
+        "independently planned Iceberg shuffles must reproduce canonical identity");
+    require(checkedRows(firstShuffle, 0L, 256L) == 256L, "first shuffle result changed");
+    require(checkedRows(repeatedShuffle, 0L, 256L) == 256L, "repeated shuffle result changed");
+    evidence.add("canonical_shuffle_replanning\tPASS");
+
     spark.range(256, 512)
         .repartition(8)
         .selectExpr("id", "concat('v-', cast(id as string)) AS payload")
@@ -210,6 +221,16 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     require(
         checkedRows(pinnedSnapshot1, 0L, 256L) == 256L,
         "pinned snapshot 1 ordinary result changed");
+
+    Dataset<Row> advancedShuffle = shuffledProjection(latestProjection(spark));
+    require(!firstShuffleIdentity.equals(canonicalIdentity(advancedShuffle)),
+        "advanced Iceberg snapshot must change canonical shuffle identity");
+    Dataset<Row> pinnedShuffle = shuffledProjection(pinnedProjection(spark, snapshot1));
+    require(firstShuffleIdentity.equals(canonicalIdentity(pinnedShuffle)),
+        "pinned Iceberg snapshot must reproduce canonical shuffle identity");
+    require(checkedRows(advancedShuffle, 0L, 512L) == 512L, "advanced shuffle result changed");
+    require(checkedRows(pinnedShuffle, 0L, 256L) == 256L, "pinned shuffle result changed");
+    evidence.add("canonical_shuffle_snapshot_binding\tPASS");
 
     Dataset<Row> filtered = latestProjection(spark).where("id >= 128");
     Certificate filteredCertificate = requireCertified(certify(filtered));
@@ -336,6 +357,18 @@ public final class ShuffleRecoveryIcebergSourceSpike {
         .select("id", "payload");
   }
 
+  private static Dataset<Row> shuffledProjection(Dataset<Row> dataset) {
+    return dataset.repartition(4, dataset.col("id"));
+  }
+
+  private static String canonicalIdentity(Dataset<Row> dataset) {
+    Certificate certificate = requireCertified(certify(dataset));
+    return ShuffleRecoveryIcebergIdentityBridge.identity(
+        dataset.queryExecution().executedPlan(), certificate.plannedScan,
+        certificate.identityBytes, certificate.decompositionDigest, certificate.mapperCount,
+        "reference-shuffle-provider-v1");
+  }
+
   /**
    * Certifies an ordinary Spark-planned Dataset without independently resolving its table or
    * snapshot. Source-planning exceptions deliberately escape this method unchanged.
@@ -378,7 +411,19 @@ public final class ShuffleRecoveryIcebergSourceSpike {
         return CertificationResult.unsupported("not-snapshot-scan");
       }
 
-      return buildCertificate(scan, icebergScan, event, taskGroups);
+      scala.collection.immutable.Seq<InputPartition> partitions =
+          batchScan.inputPartitions();
+      if (partitions.size() != taskGroups.size()) {
+        return CertificationResult.unsupported("spark-partition-count-disagreement");
+      }
+      for (int index = 0; index < partitions.size(); index++) {
+        if (!(partitions.apply(index) instanceof SparkInputPartition)
+            || ((SparkInputPartition) partitions.apply(index)).<PartitionScanTask>taskGroup()
+                != taskGroups.get(index)) {
+          return CertificationResult.unsupported("spark-partition-task-group-disagreement");
+        }
+      }
+      return buildCertificate(batchScan, scan, icebergScan, event, taskGroups);
     } catch (BoundExceededException e) {
       return CertificationResult.unsupported(e.code);
     } finally {
@@ -387,6 +432,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
   }
 
   private static CertificationResult buildCertificate(
+      BatchScanExec plannedScan,
       SparkBatchQueryScan sparkScan,
       Scan<?, ? extends ScanTask, ? extends ScanTaskGroup<?>> icebergScan,
       ScanEvent event,
@@ -435,6 +481,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
 
       return CertificationResult.certified(
           new Certificate(
+              plannedScan,
               tableUuid,
               event.snapshotId(),
               identityBytes,
@@ -889,6 +936,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
   }
 
   static final class Certificate {
+    final BatchScanExec plannedScan;
     final UUID tableUuid;
     final long snapshotId;
     final byte[] identityBytes;
@@ -898,6 +946,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     final int deleteFileCount;
 
     Certificate(
+        BatchScanExec plannedScan,
         UUID tableUuid,
         long snapshotId,
         byte[] identityBytes,
@@ -905,6 +954,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
         int mapperCount,
         int fileTaskCount,
         int deleteFileCount) {
+      this.plannedScan = plannedScan;
       this.tableUuid = tableUuid;
       this.snapshotId = snapshotId;
       this.identityBytes = identityBytes.clone();

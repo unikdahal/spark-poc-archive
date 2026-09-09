@@ -18,7 +18,7 @@
 package org.apache.spark.sql.execution.exchange
 
 import org.apache.spark.shuffle.{ShuffleRecoveryMapperDecomposition, ShuffleRecoveryMapperSplit, ShuffleRecoverySourceToken}
-import org.apache.spark.sql.connector.read.{HasPartitionKey, InputPartition}
+import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 
 /**
@@ -92,9 +92,6 @@ private[sql] object ShuffleRecoverySourceBinding {
       if (entry == null || actual(index) == null || (entry._1 ne actual(index)) ||
           entry._2 == null || entry._2.isEmpty || entry._2.length > MaxDescriptorBytes) {
         return Left(SourceTokenUnavailable)
-      }
-      if (entry._1.isInstanceOf[HasPartitionKey]) {
-        return Left(UnsupportedPartitioning)
       }
       bytes += 16L + entry._2.length
       if (bytes > MaxCertificateBytes) {

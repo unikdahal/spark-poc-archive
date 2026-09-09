@@ -46,7 +46,7 @@ import org.apache.spark.sql.catalyst.plans.physical.{
   RangePartitioning,
   SinglePartition}
 import org.apache.spark.sql.catalyst.util.CollationFactory
-import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReaderFactory, Scan}
+import org.apache.spark.sql.connector.read.{Batch, HasPartitionKey, InputPartition, PartitionReaderFactory, Scan}
 import org.apache.spark.sql.execution.{ProjectExec, RangeExec, SparkPlan}
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 import org.apache.spark.sql.test.SharedSparkSession
@@ -118,6 +118,14 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
     assert(ShuffleRecoverySourceBinding.bind(plan, "example.source", 1, Array[Byte](1),
       entries.map { case (part, _) => part -> new Array[Byte](65537) }) ===
       Left(SourceTokenUnavailable))
+  }
+
+  test("partition key capability alone does not imply a grouped source read") {
+    val plan = batchPlan(hasPartitionKey = true)
+    val entries = plan.inputPartitions.toVector.map(_ -> Array[Byte](1))
+    val binding = ShuffleRecoverySourceBinding.bind(
+      plan, "example.source", 1, Array[Byte](2), entries).toOption.get
+    assert(certifiedBuild(plan, binding).isInstanceOf[ShuffleRecoveryIdentityBuilt])
   }
 
   test("ordinary source planning failures are not converted to certification misses") {
@@ -431,13 +439,24 @@ class ShuffleRecoveryComputationIdentityBuilderSuite extends SharedSparkSession 
       ShuffleRecoveryIdentityRejected(UnsupportedExpression))
   }
 
-  private def batchPlan(failure: Option[RuntimeException] = None): BatchScanExec = {
+  private def batchPlan(
+      failure: Option[RuntimeException] = None,
+      hasPartitionKey: Boolean = false): BatchScanExec = {
     val source = new Scan with Batch {
       override def readSchema(): StructType = new StructType().add("id", IntegerType)
       override def toBatch: Batch = this
       override def planInputPartitions(): Array[InputPartition] = {
         failure.foreach(error => throw error)
-        Array(new InputPartition {}, new InputPartition {})
+        Array.tabulate[InputPartition](2) { _ =>
+          if (hasPartitionKey) {
+            new InputPartition with HasPartitionKey {
+              override def partitionKey(): InternalRow =
+                throw new IllegalStateException("ungrouped reads must not request partition keys")
+            }
+          } else {
+            new InputPartition {}
+          }
+        }
       }
       override def createReaderFactory(): PartitionReaderFactory =
         throw new UnsupportedOperationException("identity tests do not read partitions")

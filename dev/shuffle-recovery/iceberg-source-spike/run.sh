@@ -114,7 +114,7 @@ conformance_evidence="${work_dir}/resolved-scan-conformance.tsv"
 stage="compile-and-run-compatibility-smoke"
 ./build/sbt -Phadoop-3 -Phive \
   "project sql" \
-  'set Test / unmanagedSourceDirectories += file(sys.props("user.dir")) / "dev/shuffle-recovery/iceberg-source-spike/src/main/java"' \
+  'set Test / unmanagedSourceDirectories ++= Seq("java", "scala").map(lang => file(sys.props("user.dir")) / "dev/shuffle-recovery/iceberg-source-spike/src/main" / lang)' \
   'set Test / unmanagedJars += file(sys.env("ICEBERG_RUNTIME_JAR"))' \
   "Test / compile" \
   "Test / runMain org.apache.iceberg.spark.source.ShuffleRecoveryIcebergCompatibilitySmoke ${smoke_evidence}"
@@ -125,12 +125,14 @@ grep -F $'result\tPASS' "${smoke_evidence}"
 stage="run-resolved-scan-conformance"
 ./build/sbt -Phadoop-3 -Phive \
   "project sql" \
-  'set Test / unmanagedSourceDirectories += file(sys.props("user.dir")) / "dev/shuffle-recovery/iceberg-source-spike/src/main/java"' \
+  'set Test / unmanagedSourceDirectories ++= Seq("java", "scala").map(lang => file(sys.props("user.dir")) / "dev/shuffle-recovery/iceberg-source-spike/src/main" / lang)' \
   'set Test / unmanagedJars += file(sys.env("ICEBERG_RUNTIME_JAR"))' \
   "Test / runMain org.apache.iceberg.spark.source.ShuffleRecoveryIcebergSourceSpike ${conformance_evidence}"
 
 test -s "${conformance_evidence}"
 grep -F $'result\tPASS' "${conformance_evidence}"
+grep -Fx $'canonical_shuffle_replanning\tPASS' "${conformance_evidence}"
+grep -Fx $'canonical_shuffle_snapshot_binding\tPASS' "${conformance_evidence}"
 grep -F $'decision\tRESOLVED_SCAN_CERTIFICATION_FEASIBLE_WITH_PRIVATE_ICEBERG_HOOKS' \
   "${conformance_evidence}"
 cat "${smoke_evidence}" "${conformance_evidence}" >> "${evidence_path}"
