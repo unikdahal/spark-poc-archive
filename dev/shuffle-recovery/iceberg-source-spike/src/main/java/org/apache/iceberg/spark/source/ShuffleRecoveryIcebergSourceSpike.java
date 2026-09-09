@@ -214,8 +214,11 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     Certificate sameProjectionAfterEvolutionCertificate =
         requireCertified(certify(sameProjectionAfterEvolution));
     require(
-        sameProjectionAfterEvolutionCertificate.sameIdentity(latestAtSnapshot2),
-        "irrelevant schema addition changed the certified projected scan");
+        !sameProjectionAfterEvolutionCertificate.sameIdentity(latestAtSnapshot2),
+        "schema addition unexpectedly preserved the full resolved-scan identity");
+    require(
+        sameProjectionAfterEvolutionCertificate.snapshotId == latestAtSnapshot2.snapshotId,
+        "schema addition unexpectedly changed the resolved snapshot");
     require(rowCount(sameProjectionAfterEvolution) == 512L, "schema addition changed old projection");
 
     Dataset<Row> evolvedProjection = spark.table(TABLE_NAME).select("id", "payload", "note");
@@ -268,7 +271,7 @@ public final class ShuffleRecoveryIcebergSourceSpike {
     evidence.add("pinned_reproduced_identity\tPASS");
     evidence.add("pushed_filter_changed_identity\tPASS");
     evidence.add("split_option_changed_identity\tPASS");
-    evidence.add("irrelevant_schema_evolution_stable\tPASS");
+    evidence.add("schema_evolution_conservative_invalidation\tPASS");
     evidence.add("projected_schema_evolution_missed\tPASS");
     evidence.add("unsupported_partitioned_scan_preserved_execution\tPASS");
     evidence.add("expired_snapshot_preserved_ordinary_error\tPASS");
