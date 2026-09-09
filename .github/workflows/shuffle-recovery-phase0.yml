@@ -351,3 +351,49 @@ jobs:
       - name: Enforce exact-candidate gate
         if: always()
         run: test '${{ steps.run.outcome }}' = success
+
+  iceberg-resolved-scan:
+    name: Iceberg 1.11.0 resolved-scan certification (JDK 17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout requested head
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: 17
+
+      - name: Cache build dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            build/apache-maven-*
+            build/*.jar
+            ~/.sbt
+            ~/.cache/coursier
+          key: shuffle-recovery-experimental-iceberg-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties', 'build/sbt') }}
+          restore-keys: |
+            shuffle-recovery-experimental-iceberg-${{ runner.os }}-
+            shuffle-recovery-build-${{ runner.os }}-
+
+      - name: Run pinned Iceberg resolved-scan conformance
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash dev/shuffle-recovery/iceberg-source-spike/run.sh \
+            "${RUNNER_TEMP}/shuffle-recovery-iceberg-source-evidence.tsv"
+
+      - name: Upload resolved-scan evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shuffle-recovery-iceberg-source-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/shuffle-recovery-iceberg-source-evidence.tsv
+          if-no-files-found: error
