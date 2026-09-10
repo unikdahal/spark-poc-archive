@@ -74,7 +74,10 @@ private[celeborn] final class ShuffleRecoveryCelebornReader[K, C](
       new ShuffleRecoveryCelebornLease(native, binding.ttlMillis, () => driverCurrent())
     } catch {
       case NonFatal(error) =>
-        try native.close() finally failed(error)
+        try native.close() catch {
+          case NonFatal(cleanupError) => error.addSuppressed(cleanupError)
+        }
+        failed(error)
     }
     val completed = new AtomicBoolean(false)
     def close(): Unit = {
