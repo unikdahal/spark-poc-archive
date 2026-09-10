@@ -44,6 +44,7 @@ if [[ "${2:-all}" != iceberg ]]; then
   grep -F 'RetainedShuffleLeasesSuite' "$root/celeborn-tests.log"
   grep -F 'RetainedShuffleDescriptorSuite' "$root/celeborn-tests.log"
   tar -C "$root/celeborn" -czf "$root/celeborn-dist.tgz" dist
+  (cd "$root" && sha256sum celeborn-dist.tgz > celeborn.sha256)
 fi
 if [[ "${2:-all}" != celeborn ]]; then
   fetch_source iceberg https://github.com/apache/iceberg.git "$iceberg_commit"
@@ -57,4 +58,5 @@ if [[ "${2:-all}" != celeborn ]]; then
     ! -name '*-sources.jar' ! -name '*-javadoc.jar')
   [[ ${#jars[@]} == 1 ]]
   cp "${jars[0]}" "$root/iceberg-runtime.jar"
+  (cd "$root" && sha256sum iceberg-runtime.jar > iceberg.sha256)
 fi

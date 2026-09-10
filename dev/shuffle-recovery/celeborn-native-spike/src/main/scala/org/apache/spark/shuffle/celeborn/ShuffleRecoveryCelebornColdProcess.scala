@@ -167,7 +167,7 @@ object ShuffleRecoveryCelebornColdProcess {
         require(row.getLong(0) == row.getLong(1) && row.getString(2).isEmpty)
         row.getLong(0)
       }.sorted
-      require(rows.sameElements((0L until 32L).toArray), "result differs from exact fixture")
+      require(rows.toVector == (0L until 32L).toVector, "result differs from exact fixture")
       sc.listenerBus.waitUntilEmpty(30000L)
       val adoptedAfterRead = adoption != null && adoption.isAdopted
       if (role == "replacement" && Set("none", "concurrent").contains(control)) {

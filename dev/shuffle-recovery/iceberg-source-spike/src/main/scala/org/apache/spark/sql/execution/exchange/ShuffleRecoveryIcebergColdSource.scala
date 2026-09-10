@@ -61,7 +61,7 @@ class ShuffleRecoveryIcebergColdSource extends ShuffleRecoveryColdProcessSource 
     // Capture the planning event before inspecting the plan. Only this adapter instance keeps
     // the certificate; each replacement JVM independently resolves and certifies its read.
     val inputs = ShuffleRecoveryIcebergSourceSpike.canonicalInputs(
-      query, providerFormat)
+      query, providerFormat).asInstanceOf[ShuffleRecoveryCanonicalInputs]
     val exchanges = query.queryExecution.executedPlan.collect {
       case exchange: ShuffleExchangeExec => exchange
     }

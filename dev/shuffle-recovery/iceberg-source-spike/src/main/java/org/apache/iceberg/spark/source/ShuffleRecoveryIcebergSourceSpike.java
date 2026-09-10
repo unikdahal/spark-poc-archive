@@ -59,7 +59,6 @@ import org.apache.iceberg.expressions.Or;
 import org.apache.iceberg.expressions.UnboundPredicate;
 import org.apache.iceberg.spark.Spark3Util;
 import org.apache.iceberg.types.Types;
-import org.apache.spark.shuffle.ShuffleRecoveryCanonicalInputs;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
@@ -370,8 +369,12 @@ public final class ShuffleRecoveryIcebergSourceSpike {
         "reference-shuffle-provider-v1");
   }
 
-  /** Out-of-tree handoff; certification must run before another caller plans this Dataset. */
-  public static ShuffleRecoveryCanonicalInputs canonicalInputs(
+  /**
+   * Out-of-tree handoff; certification must run before another caller plans this Dataset.
+   * Keep the return opaque here: Spark's package-private Scala type is recovered by the adapter
+   * inside the Spark package, without widening the Core API for mixed Java/Scala compilation.
+   */
+  public static Object canonicalInputs(
       Dataset<Row> dataset, String providerReadFormatId) {
     Certificate certificate = requireCertified(certify(dataset));
     return ShuffleRecoveryIcebergIdentityBridge.inputs(
