@@ -58,7 +58,7 @@ object ShuffleRecoveryCelebornColdProcess {
     val Array(role, root, evidence, group, control) = args
     require(Set("baseline", "producer", "replacement").contains(role))
     require(Set("none", "source-token", "manifest-missing", "source-snapshot",
-      "producer-filter", "artifact-loss", "concurrent").contains(control))
+      "producer-filter", "artifact-loss", "concurrent", "lease-expiry").contains(control))
     require(role == "replacement" || control == "none")
     val source = new ShuffleRecoveryIcebergColdSource
     val builder = SparkSession.builder().master("local[2]")
@@ -121,7 +121,7 @@ object ShuffleRecoveryCelebornColdProcess {
         } else Paths.get(root)
         ShuffleRecoveryCelebornPreparation.prepare(sc,
           ShuffleRecoveryPreparationRequest(group, 2L, target, inputs),
-          manifestRoot, 60000L) match {
+          manifestRoot, if (control == "lease-expiry") 3000L else 60000L) match {
           case Right(session) => adoption = session; offered = true
           case Left(reason) => missReason = reason
         }
@@ -150,6 +150,24 @@ object ShuffleRecoveryCelebornColdProcess {
         }
         require(peers.forall(Files.exists(_)), "both readers must hold claims concurrently")
       }
+      if (control == "lease-expiry") {
+        require(adoptedBeforeRead, "expiry fault must follow adoption")
+        val controls = Paths.get(sys.env("CELEBORN_PROOF_CONTROL_ROOT"))
+        def signalAndWait(request: String, acknowledgement: String): Unit = {
+          Files.write(controls.resolve(request), Array[Byte](1), StandardOpenOption.CREATE_NEW)
+          val deadline = System.nanoTime() + 30000000000L
+          while (!Files.exists(controls.resolve(acknowledgement)) &&
+              System.nanoTime() < deadline) {
+            Thread.sleep(100L)
+          }
+          require(Files.exists(controls.resolve(acknowledgement)), "owner fault timed out")
+        }
+        signalAndWait("pause-owner", "owner-paused")
+        // The service cannot answer renewals. Local lease expiry must remain permanent even
+        // if an in-flight renewal returns successfully after the same owner resumes.
+        Thread.sleep(5000L)
+        signalAndWait("resume-owner", "owner-resumed")
+      }
       if (control == "artifact-loss") {
         require(adoptedBeforeRead && tasks.count.get() == 0L,
           "fault must happen after adoption and before ordinary maps run")
@@ -174,10 +192,10 @@ object ShuffleRecoveryCelebornColdProcess {
         require(offered && adoptedBeforeRead && adoptedAfterRead && tasks.count.get() == 0L &&
           tasks.remoteBytesRead.get() > 0L,
           "replacement must read the adopted shuffle without launching target map tasks")
-      } else if (control == "artifact-loss") {
+      } else if (Set("artifact-loss", "lease-expiry").contains(control)) {
         require(offered && adoptedBeforeRead && !adoptedAfterRead &&
           tasks.count.get() > 0L && tasks.fetchFailures.get() > 0L,
-          "lost native files must cause fetch failure and whole-shuffle recomputation")
+          "unavailable native claim must cause fetch failure and whole-shuffle recomputation")
       } else {
         require(!adoptedBeforeRead && !adoptedAfterRead && tasks.count.get() > 0L,
           "baseline, producer and negative controls must execute target map tasks")

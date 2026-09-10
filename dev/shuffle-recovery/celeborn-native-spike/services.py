@@ -21,6 +21,7 @@
 import os
 from pathlib import Path
 import socket
+import signal
 import subprocess
 import sys
 import time
@@ -110,16 +111,42 @@ def main():
         start("worker", "org.apache.celeborn.service.deploy.worker.Worker", [])
         wait_for(lambda: "Register worker successfully." in
                  (root / "worker.log").read_text(errors="replace"), "worker registration")
-        start("lifecycle-manager",
+        owner = start("lifecycle-manager",
               "org.apache.celeborn.server.lifecyclemanager.LifecycleManagerDaemon",
               ["--app-id", "cold-" + uuid.uuid4().hex,
                "--master-endpoints", f"127.0.0.1:{master_port}", "--port", str(owner_port)])
         wait_for(lambda: endpoint.is_file() and endpoint.stat().st_size > 0,
                  "retention control endpoint publication")
         env = dict(os.environ, CELEBORN_RETAINED_ENDPOINT_FILE=str(endpoint),
-                   CELEBORN_PROOF_WORKER_ROOT=str(worker_data / "retained-proof"))
-        subprocess.run(["bash", "dev/shuffle-recovery/celeborn-native-spike/cold-process.sh",
-                        str(root / "drivers")], env=env, check=True)
+                   CELEBORN_PROOF_WORKER_ROOT=str(worker_data / "retained-proof"),
+                   CELEBORN_PROOF_CONTROL_ROOT=str(root))
+        child = subprocess.Popen(
+            ["bash", "dev/shuffle-recovery/celeborn-native-spike/cold-process.sh",
+             str(root / "drivers")], env=env)
+        paused = False
+        try:
+            while child.poll() is None:
+                if (root / "pause-owner").exists() and not (root / "owner-paused").exists():
+                    owner.send_signal(signal.SIGSTOP)
+                    paused = True
+                    (root / "owner-paused").write_text("paused the harness-owned lifecycle JVM\n")
+                if paused and (root / "resume-owner").exists():
+                    owner.send_signal(signal.SIGCONT)
+                    paused = False
+                    (root / "owner-resumed").write_text("resumed the same owner incarnation\n")
+                time.sleep(0.2)
+            if child.returncode != 0:
+                raise subprocess.CalledProcessError(child.returncode, child.args)
+        finally:
+            if paused and owner.poll() is None:
+                owner.send_signal(signal.SIGCONT)
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
     finally:
         for process in reversed(processes):
             if process.poll() is None:

@@ -43,7 +43,14 @@ This requires `CELEBORN_PROOF_WORKER_ROOT`, supplied by the service runner.
 
 Two concurrent replacement JVMs also hold independent adopted claims at a shared
 barrier before reading. Each must report zero map tasks and positive remote bytes.
-The pass marker covers cold-process reuse, concurrent claims, identity controls
-and artifact loss. Owner restart and lease expiration during an executor read
-still require additional integration evidence; provider unit tests exercise
-independent claim release, exact expiry, clock wraparound and owner shutdown.
+The lease-expiry control uses a three-second replacement lease. After adoption,
+the supervisor pauses only its own lifecycle JVM for five seconds, then resumes
+that same incarnation. Renewal replies cannot revive an expired local lease;
+the read must fail through the binding check and trigger correct recomputation.
+The supervisor resumes a paused owner even when the child fails.
+
+The pass marker covers cold-process reuse, concurrent claims, identity controls,
+lease expiry before reading and artifact loss. Owner restart and expiry during
+an already-open executor stream still require additional integration evidence.
+Provider unit tests exercise independent claim release, exact expiry, clock
+wraparound and owner shutdown.

@@ -90,6 +90,7 @@ for control in source-token manifest-missing producer-filter; do
   run_child "$control" replacement "$control"
 done
 export SPARK_SHUFFLE_RECOVERY_TEST_PRODUCER_FILTER=false
+run_child lease-expiry replacement lease-expiry
 python3 dev/shuffle-recovery/celeborn-native-spike/artifact-loss.py \
   "${work_dir}/manifests" "${evidence_dir}/artifact-loss-files.txt" &
 fault_pid=$!
@@ -111,7 +112,7 @@ processes = set()
 records = {}
 for name in ("baseline", "producer", "replacement", "concurrent-a", "concurrent-b",
              "source-token",
-             "manifest-missing", "producer-filter", "source-snapshot", "artifact-loss"):
+             "manifest-missing", "producer-filter", "source-snapshot", "artifact-loss", "lease-expiry"):
     row = dict(line.split("=", 1) for line in
                (root / (name + ".properties")).read_text().splitlines())
     process = (row["pid"], row["started"])
@@ -128,7 +129,7 @@ for name, row in records.items():
         assert row["mapTaskCount"] == "0" and int(row["remoteBytesRead"]) > 0
     else:
         assert row["adopted"] == "false" and int(row["mapTaskCount"]) > 0, name
-        if name == "artifact-loss":
+        if name in ("artifact-loss", "lease-expiry"):
             assert row["adoptedBeforeRead"] == "true" and int(row["fetchFailures"]) > 0
 assert (root / "snapshot-before.txt").read_text() != (
     root / "snapshot-after.txt").read_text()
