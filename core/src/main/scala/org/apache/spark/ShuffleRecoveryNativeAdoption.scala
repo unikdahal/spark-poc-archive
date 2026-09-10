@@ -256,6 +256,12 @@ private[spark] final class ShuffleRecoveryNativeAdoption
     adopted.contains(shuffleId)
   }
 
+  def unregisterShuffle(shuffleId: Int, tracker: MapOutputTrackerMaster): Unit = lock.synchronized {
+    pending.get(shuffleId).map(_.reservation.materializationId)
+      .orElse(adopted.get(shuffleId).map(_.pending.reservation.materializationId))
+      .foreach(cancel(_, tracker))
+  }
+
   def cancel(
       materialization: ShuffleRecoveryMaterializationId,
       tracker: MapOutputTrackerMaster): Unit = lock.synchronized {

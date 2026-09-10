@@ -3492,6 +3492,13 @@ private[spark] class DAGScheduler(
       case FetchFailed(bmAddress, shuffleId, _, mapIndex, reduceId, failureMessage) =>
         val failedStage = stageIdToStage(task.stageId)
         val mapStage = shuffleIdToMapStage(shuffleId)
+        val recoveryFailure = if (!mapStage.isPipelined &&
+            failedStage.latestInfo.attemptNumber() == task.stageAttemptId) {
+          ShuffleRecoverySchedulerAdoption.handleManagerFetchFailure(
+            mapOutputTracker, mapStage.shuffleDep, bmAddress, task.epoch)
+        } else {
+          ShuffleRecoveryFetchFailureNotAdopted
+        }
 
         if (failedStage.latestInfo.attemptNumber() != task.stageAttemptId) {
           logInfo(log"Ignoring fetch failure from " +
@@ -3500,6 +3507,8 @@ private[spark] class DAGScheduler(
             log"${MDC(STAGE_ATTEMPT_ID, task.stageAttemptId)} and there is a more recent attempt for " +
             log"that stage (attempt " +
             log"${MDC(NUM_ATTEMPT, failedStage.latestInfo.attemptNumber())}) running")
+        } else if (recoveryFailure == ShuffleRecoveryFetchFailureStale) {
+          logInfo(log"Ignoring a stale recovery fetch failure from ${MDC(TASK_ID, task)}")
         } else if (activeJobForStage(failedStage).flatMap(jobIdToActiveJob.get)
             .exists(_.hasPipelinedDependency) &&
             (isPipelinedGroupMember(failedStage) || isPipelinedGroupMember(mapStage))) {
@@ -3638,7 +3647,8 @@ private[spark] class DAGScheduler(
                 // included in the cleanup: clearing its shuffle outputs, marking old task results
                 // to be ignored, and creating a new shuffle merge state for the upcoming retry.
                 if (mapStage.isStaticallyIndeterminate &&
-                    !mapStage.shuffleDep.checksumMismatchFullRetryEnabled) {
+                    (!mapStage.shuffleDep.checksumMismatchFullRetryEnabled ||
+                      recoveryFailure.isInstanceOf[ShuffleRecoveryFetchFailureInvalidated])) {
                   rollbackSucceedingStages(mapStage, rollbackCurrentStage = true)
                 }
 
@@ -3659,8 +3669,12 @@ private[spark] class DAGScheduler(
             }
           }
 
-          // TODO: mark the executor as failed only if there were lots of fetch failures on it
-          unregisterOutputsOnFetchFailedExecutor(bmAddress, task)
+          // A recovered location identifies a binding generation, not a failed physical executor.
+          // Its backend already invalidated the entire adopted shuffle above.
+          if (!recoveryFailure.isInstanceOf[ShuffleRecoveryFetchFailureInvalidated]) {
+            // TODO: mark the executor as failed only if there were lots of fetch failures on it
+            unregisterOutputsOnFetchFailedExecutor(bmAddress, task)
+          }
         }
 
       case failure: TaskFailedReason if task.isBarrier =>

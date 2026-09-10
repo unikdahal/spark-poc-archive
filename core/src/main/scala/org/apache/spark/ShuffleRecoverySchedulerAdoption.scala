@@ -809,6 +809,21 @@ private[spark] object ShuffleRecoverySchedulerAdoption {
     state.exists(_.consumeWholeStageRetryRequirement(shuffleId))
   }
 
+  /** Manager-owned readers report failures through the scheduler instead of the local resolver. */
+  def handleManagerFetchFailure(
+      tracker: MapOutputTrackerMaster,
+      dependency: ShuffleDependency[_, _, _],
+      blockManagerId: BlockManagerId,
+      taskEpoch: Long): ShuffleRecoveryFetchFailureAction = {
+    Option(SparkEnv.get).map(_.shuffleManager) match {
+      case Some(manager: ShuffleRecoverySchedulerBackendProvider) =>
+        Option(manager.shuffleRecoverySchedulerBackend)
+          .map(_.handleFetchFailure(tracker, dependency, blockManagerId, taskEpoch))
+          .getOrElse(ShuffleRecoveryFetchFailureNotAdopted)
+      case _ => ShuffleRecoveryFetchFailureNotAdopted
+    }
+  }
+
   def currentState: Option[ShuffleRecoverySchedulerAdoptionState] = state.collect {
     case indexed: ShuffleRecoverySchedulerAdoptionState => indexed
   }

@@ -296,3 +296,32 @@ permission to perform RPCs or wait for streams on the scheduler thread. The Cele
 implementation still needs to implement this contract. Regression tests cover late preparation,
 cancellation, matching versus stale failures, and the one-shot rollback marker; they are written
 but have not run. This transaction alone is not an end-to-end native read demonstration.
+
+### Celeborn native consumer wiring
+
+The development manager now wraps native shuffle handles with a serializable adoption binding.
+Preparation registers the reservation before discovery, validates the canonical manifest and
+provider read format, acquires an independent driver lease, and offers the local installation to
+`ShuffleRecoveryNativeAdoption`. The preparation helper returns a session only after a successful
+offer; the scheduler can still let ordinary execution win before commit. Closing the session
+fences the materialization and queues provider cleanup.
+
+Adopted executor reads deserialize Celeborn's native partition streams using the dependency's
+serializer. The initial adapter admits unaggregated row shuffles without RDD key ordering or
+map-side combine, including the targeted SQL exchange path. Unsupported dependencies fail
+preparation and remain eligible for ordinary execution. Map ranges and coalesced reducer ranges
+are checked against the sealed shape. Each reader obtains its own lease and renews away from
+fetch threads. Renewal also checks a driver RPC endpoint for the exact installed binding; ordinary
+stream consumption performs local liveness checks. This provides periodic fencing visibility,
+not instantaneous cross-process revocation. Initial reader setup checks the driver before claiming.
+
+Read/open/decode failures are reported with the adoption-specific location in `FetchFailed`.
+DAGScheduler now calls manager-owned recovery failure hooks before its normal retry handling.
+A matching native failure clears all adopted outputs and triggers whole-stage rollback even when
+the checksum retry option is enabled. Stale binding failures are ignored, and synthetic recovery
+locations do not trigger physical executor/host-loss cleanup. The reference resolver path retains
+its existing fetch-thread invalidation mechanism.
+
+The wiring is implemented but uncompiled. A pinned-fork cold-process runner, real Iceberg query
+execution, failure controls, task-count assertions, and combined CI validation are still required
+before reporting that the end-to-end native recovery path works.
