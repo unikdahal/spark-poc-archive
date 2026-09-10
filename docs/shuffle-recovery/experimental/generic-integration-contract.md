@@ -193,3 +193,26 @@ must be owned by a lifecycle service independent of Spark attempts before they p
 cross-driver retention. Spark's reference provider now wraps opened map views with a
 live-binding check, including buffer release when the binding expires during acquisition.
 Both changes remain unvalidated pending the combined implementation batch.
+
+### Native publication envelope
+
+The manifest codec now has a version-two native descriptor mode. It carries bounded opaque
+provider bytes alongside the complete identity, shape, publication generation, and incarnation.
+Native manifests have no per-map file-index artifacts; mixed modes and empty native descriptors
+are rejected. Existing indexed manifests still encode as version one. The overall manifest limit
+is now 8 MiB, with at most 5 MiB of native provider bytes. The existing immutable filesystem store
+and full-identity discovery logic support both modes. The indexed preparation validator explicitly
+rejects native manifests rather than constructing synthetic block metadata.
+
+`ShuffleRecoveryNativePublicationBackend` binds publication to a certified exchange's local
+shuffle ID and canonical identity. It requires the provider's compatibility ID to match the
+identity, complete scheduler attempt coordinates, and partition-ordered tracker agreement before
+and after provider sealing. The generic provider callback receives task IDs, stage attempt IDs,
+and task attempt numbers. Providers perform their native encoding outside Core. The listener
+retains these coordinates across stage retries, including maps reused from earlier attempts.
+Tracker validation now compares the full winner vector under one shuffle read lock.
+
+This is the publication contract and storage implementation. A provider callback, native consumer
+preparation and installation, SQL integration, and renewal/invalidation wiring are still required
+for an executed native recovery path. The new regression suites are written, not run. No native
+end-to-end success is claimed by the manifest codec or its publication backend.

@@ -113,6 +113,9 @@ private[spark] final class ShuffleRecoveryUntrustedBoundary private[shuffle] (
       if (manifest.descriptorVersion != ShuffleRecoveryManifest.DescriptorVersion) {
         return Left("candidate read descriptor version is unsupported")
       }
+      if (manifest.nativeDescriptor.isDefined) {
+        return Left("native descriptor requires a native provider preparation path")
+      }
       if (manifest.mapArtifacts.size != manifest.mapperCount) {
         return Left("candidate does not contain exactly one descriptor per mapper")
       }

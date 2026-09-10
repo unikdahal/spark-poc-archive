@@ -130,7 +130,7 @@ private[spark] final case class ShuffleRecoveryMapArtifact(
     dataLength: Long,
     indexLength: Long)
 
-/** Immutable description of one complete reference-provider shuffle incarnation. */
+/** Immutable description of one complete retained shuffle incarnation. */
 private[spark] final case class ShuffleRecoveryManifest(
     recoveryGroup: String,
     generation: Long,
@@ -141,10 +141,12 @@ private[spark] final case class ShuffleRecoveryManifest(
     mapArtifacts: Vector[ShuffleRecoveryMapArtifact],
     descriptorVersion: Int,
     reducerBytes: Option[Vector[Long]],
-    publicationTimestampMillis: Long)
+    publicationTimestampMillis: Long,
+    nativeDescriptor: Option[Vector[Byte]] = None)
 
 private[spark] object ShuffleRecoveryManifest {
   val FormatVersion = 1
+  val NativeFormatVersion = 2
   val DescriptorVersion = 1
 }
 
@@ -218,7 +220,8 @@ private[shuffle] object ShuffleRecoveryIdentityCodec {
 private[spark] object ShuffleRecoveryManifestCodec {
   private val Magic = 0x53524d31 // SRM1
 
-  private[shuffle] val MaxManifestBytes = 4 * 1024 * 1024
+  private[shuffle] val MaxManifestBytes = 8 * 1024 * 1024
+  private[shuffle] val MaxNativeDescriptorBytes = 5 * 1024 * 1024
   private[shuffle] val MaxIdentityBytes = 16 * 1024
   private[shuffle] val MaxStringBytes = 4096
   private[shuffle] val MaxIdentifierBytes = 128
@@ -232,7 +235,11 @@ private[spark] object ShuffleRecoveryManifestCodec {
     val bytes = new ByteArrayOutputStream(estimated)
     val out = new DataOutputStream(bytes)
     out.writeInt(Magic)
-    out.writeInt(ShuffleRecoveryManifest.FormatVersion)
+    out.writeInt(if (manifest.nativeDescriptor.isDefined) {
+      ShuffleRecoveryManifest.NativeFormatVersion
+    } else {
+      ShuffleRecoveryManifest.FormatVersion
+    })
     writeString(out, manifest.recoveryGroup, "recovery group")
     out.writeLong(manifest.generation)
     writeString(out, manifest.incarnationId, "incarnation id")
@@ -260,6 +267,9 @@ private[spark] object ShuffleRecoveryManifestCodec {
       case None => out.writeBoolean(false)
     }
     out.writeLong(manifest.publicationTimestampMillis)
+    manifest.nativeDescriptor.foreach { descriptor =>
+      writeBytes(out, descriptor.toArray, MaxNativeDescriptorBytes, "native descriptor")
+    }
     out.flush()
     val result = bytes.toByteArray
     if (result.length > MaxManifestBytes) {
@@ -278,7 +288,8 @@ private[spark] object ShuffleRecoveryManifestCodec {
         throw new IOException("invalid manifest magic")
       }
       val formatVersion = in.readInt()
-      if (formatVersion != ShuffleRecoveryManifest.FormatVersion) {
+      val native = formatVersion == ShuffleRecoveryManifest.NativeFormatVersion
+      if (formatVersion != ShuffleRecoveryManifest.FormatVersion && !native) {
         throw new IOException(s"unsupported manifest version: $formatVersion")
       }
       val recoveryGroup = readString(in, "recovery group")
@@ -314,7 +325,7 @@ private[spark] object ShuffleRecoveryManifestCodec {
       val reducerCount = in.readInt()
       val descriptorVersion = in.readInt()
       val handleCount = in.readInt()
-      validateCountsBeforeAllocation(mapperCount, reducerCount, handleCount)
+      validateCountsBeforeAllocation(mapperCount, reducerCount, handleCount, native)
 
       val artifacts = Vector.newBuilder[ShuffleRecoveryMapArtifact]
       var mapIndex = 0
@@ -344,6 +355,11 @@ private[spark] object ShuffleRecoveryManifestCodec {
         None
       }
       val publicationTimestampMillis = in.readLong()
+      val nativeDescriptor = if (native) {
+        Some(readBytes(in, MaxNativeDescriptorBytes, "native descriptor").toVector)
+      } else {
+        None
+      }
       if (in.available() != 0) {
         throw new IOException("trailing manifest bytes")
       }
@@ -358,7 +374,8 @@ private[spark] object ShuffleRecoveryManifestCodec {
         artifacts.result(),
         descriptorVersion,
         reducerBytes,
-        publicationTimestampMillis)
+        publicationTimestampMillis,
+        nativeDescriptor)
       validateManifest(manifest)
       manifest
     } catch {
@@ -379,7 +396,13 @@ private[spark] object ShuffleRecoveryManifestCodec {
     }
     validateIdentity(manifest.identity)
     validateCountsBeforeAllocation(
-      manifest.mapperCount, manifest.reducerCount, manifest.mapArtifacts.size)
+      manifest.mapperCount, manifest.reducerCount, manifest.mapArtifacts.size,
+      manifest.nativeDescriptor.isDefined)
+    manifest.nativeDescriptor.foreach { descriptor =>
+      if (descriptor == null || descriptor.isEmpty || descriptor.size > MaxNativeDescriptorBytes) {
+        throw new IllegalArgumentException("invalid native provider descriptor")
+      }
+    }
     if (manifest.mapperCount != manifest.identity.mapperCount ||
         manifest.reducerCount != manifest.identity.reducerCount) {
       throw new IllegalArgumentException("manifest shape disagrees with feasibility identity")
@@ -468,14 +491,16 @@ private[spark] object ShuffleRecoveryManifestCodec {
   private def validateCountsBeforeAllocation(
       mapperCount: Int,
       reducerCount: Int,
-      handleCount: Int): Unit = {
+      handleCount: Int,
+      native: Boolean = false): Unit = {
     if (mapperCount < 0 || mapperCount > MaxMaps) {
       throw new IOException("invalid mapper count")
     }
     if (reducerCount <= 0 || reducerCount > MaxReducers) {
       throw new IOException("invalid reducer count")
     }
-    if (handleCount != mapperCount || handleCount < 0 || handleCount > MaxMaps) {
+    val expectedHandles = if (native) 0 else mapperCount
+    if (handleCount != expectedHandles || handleCount < 0 || handleCount > MaxMaps) {
       throw new IOException("invalid map artifact count")
     }
     try {
@@ -511,6 +536,7 @@ private[spark] object ShuffleRecoveryManifestCodec {
     manifest.reducerBytes.foreach { values =>
       add(4L + Math.multiplyExact(values.size.toLong, 8L))
     }
+    manifest.nativeDescriptor.foreach(descriptor => add(4L + descriptor.size))
     size.toInt
   }
 
