@@ -40,18 +40,29 @@ entry=org.apache.spark.shuffle.celeborn.ShuffleRecoveryCelebornColdProcess
 setup=org.apache.spark.sql.execution.exchange.ShuffleRecoveryIcebergColdSourceSetup
 group="native-$(basename "${work_dir}")"
 
+export NATIVE_PROOF_CLASSPATH="${evidence_dir}/classpath.txt"
+export NATIVE_PROOF_JAVA_OPTIONS="${evidence_dir}/java-options.txt"
+timeout --kill-after=30s 45m ./build/sbt -Phadoop-3 -Phive 'project sql' \
+  'set Test / unmanagedSourceDirectories ++= Seq("java", "scala").map(lang => file(sys.props("user.dir")) / "dev/shuffle-recovery/iceberg-source-spike/src/main" / lang)' \
+  'set Test / unmanagedSourceDirectories += file(sys.props("user.dir")) / "dev/shuffle-recovery/celeborn-native-spike/src/main/scala"' \
+  'set Test / unmanagedJars ++= Seq("ICEBERG_RUNTIME_JAR", "CELEBORN_RUNTIME_JAR").map(key => file(sys.env(key)))' \
+  'set Test / javaOptions += "-Dspark.shuffle.useOldFetchProtocol=false"' \
+  'set Global / commands += Command.command("exportNativeProof") { state => val ex = Project.extract(state); val (next, cp) = ex.runTask(Test / fullClasspath, state); val (done, opts) = Project.extract(next).runTask(Test / javaOptions, next); IO.write(file(sys.env("NATIVE_PROOF_CLASSPATH")), cp.files.map(_.getAbsolutePath).mkString(java.io.File.pathSeparator)); IO.write(file(sys.env("NATIVE_PROOF_JAVA_OPTIONS")), opts.mkString("\n")); done }' \
+  'Test/compile' 'exportNativeProof' 2>&1 | tee "${evidence_dir}/compile.log"
+[[ -s "$NATIVE_PROOF_CLASSPATH" && -s "$NATIVE_PROOF_JAVA_OPTIONS" ]]
+mapfile -t java_options < "$NATIVE_PROOF_JAVA_OPTIONS"
+classpath="$(cat "$NATIVE_PROOF_CLASSPATH")"
 run_main() {
   local label="$1" command="$2"
-  # Each sbt invocation forks a fresh driver and returns only after that driver exits.
-  rm -rf "${work_dir}/scratch"
-  mkdir "${work_dir}/scratch"
-  timeout --kill-after=30s 20m ./build/sbt -Phadoop-3 -Phive 'project sql' \
-    'set Test / unmanagedSourceDirectories ++= Seq("java", "scala").map(lang => file(sys.props("user.dir")) / "dev/shuffle-recovery/iceberg-source-spike/src/main" / lang)' \
-    'set Test / unmanagedSourceDirectories += file(sys.props("user.dir")) / "dev/shuffle-recovery/celeborn-native-spike/src/main/scala"' \
-    'set Test / unmanagedJars ++= Seq("ICEBERG_RUNTIME_JAR", "CELEBORN_RUNTIME_JAR").map(key => file(sys.env(key)))' \
-    'set Test / run / fork := true' \
-    'set Test / javaOptions += "-Dspark.shuffle.useOldFetchProtocol=false"' \
-    "Test/runMain ${command}" 2>&1 | tee "${evidence_dir}/${label}.log"
+  local -a arguments
+  read -r -a arguments <<< "$command"
+  # Separate scratch per child also permits concurrent replacement drivers.
+  local scratch="${work_dir}/scratch/${label}"
+  mkdir -p "$scratch"
+  SPARK_LOCAL_DIRS="$scratch" timeout --kill-after=30s 15m \
+    "${JAVA_HOME}/bin/java" "${java_options[@]}" "-Djava.io.tmpdir=${scratch}" \
+    -cp "$classpath" "${arguments[@]}" 2>&1 | tee "${evidence_dir}/${label}.log"
+  rm -rf "$scratch"
 }
 run_child() {
   local label="$1" role="$2" control="$3"
@@ -61,6 +72,16 @@ run_main create "${setup} create ${evidence_dir}/snapshot-before.txt"
 run_child baseline baseline none
 run_child producer producer none
 run_child replacement replacement none
+# Both readers independently claim the same descriptor; neither owns the other's lease.
+run_child concurrent-a replacement concurrent &
+first_reader=$!
+run_child concurrent-b replacement concurrent &
+second_reader=$!
+first_status=0
+second_status=0
+wait "$first_reader" || first_status=$?
+wait "$second_reader" || second_status=$?
+[[ "$first_status" == 0 && "$second_status" == 0 ]]
 for control in source-token manifest-missing producer-filter; do
   export SPARK_SHUFFLE_RECOVERY_TEST_PRODUCER_FILTER=false
   if [[ "$control" == producer-filter ]]; then
@@ -88,7 +109,8 @@ from pathlib import Path
 root = Path(sys.argv[1])
 processes = set()
 records = {}
-for name in ("baseline", "producer", "replacement", "source-token",
+for name in ("baseline", "producer", "replacement", "concurrent-a", "concurrent-b",
+             "source-token",
              "manifest-missing", "producer-filter", "source-snapshot", "artifact-loss"):
     row = dict(line.split("=", 1) for line in
                (root / (name + ".properties")).read_text().splitlines())
@@ -101,9 +123,9 @@ baseline = records["baseline"]
 for name, row in records.items():
     assert row["resultDigest"] == baseline["resultDigest"], name
     assert row["testedCommit"] == baseline["testedCommit"], name
-    if name == "replacement":
+    if name in ("replacement", "concurrent-a", "concurrent-b"):
         assert row["adopted"] == "true" and row["offered"] == "true"
-        assert row["mapTaskCount"] == "0"
+        assert row["mapTaskCount"] == "0" and int(row["remoteBytesRead"]) > 0
     else:
         assert row["adopted"] == "false" and int(row["mapTaskCount"]) > 0, name
         if name == "artifact-loss":

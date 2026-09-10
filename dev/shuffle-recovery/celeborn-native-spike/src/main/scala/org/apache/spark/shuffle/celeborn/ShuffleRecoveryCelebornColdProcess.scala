@@ -38,8 +38,12 @@ object ShuffleRecoveryCelebornColdProcess {
     private val stages = ConcurrentHashMap.newKeySet[Integer]()
     val count = new AtomicLong()
     val fetchFailures = new AtomicLong()
+    val remoteBytesRead = new AtomicLong()
     override def onTaskEnd(event: SparkListenerTaskEnd): Unit = {
       if (event.reason.isInstanceOf[FetchFailed]) fetchFailures.incrementAndGet()
+      if (event.taskMetrics != null) {
+        remoteBytesRead.addAndGet(event.taskMetrics.shuffleReadMetrics.remoteBytesRead)
+      }
     }
     override def onStageSubmitted(event: SparkListenerStageSubmitted): Unit = {
       if (event.stageInfo.rddInfos.exists(_.id == rddId)) stages.add(event.stageInfo.stageId)
@@ -54,7 +58,7 @@ object ShuffleRecoveryCelebornColdProcess {
     val Array(role, root, evidence, group, control) = args
     require(Set("baseline", "producer", "replacement").contains(role))
     require(Set("none", "source-token", "manifest-missing", "source-snapshot",
-      "producer-filter", "artifact-loss").contains(control))
+      "producer-filter", "artifact-loss", "concurrent").contains(control))
     require(role == "replacement" || control == "none")
     val source = new ShuffleRecoveryIcebergColdSource
     val builder = SparkSession.builder().master("local[2]")
@@ -102,6 +106,7 @@ object ShuffleRecoveryCelebornColdProcess {
         if (control == "source-token") "different-source" else "fixture", format)
       val tasks = new TargetTasks(dependency.rdd.id)
       sc.addSparkListener(tasks)
+      val preparationStarted = System.nanoTime()
       var offered = false
       var missReason = ""
       if (role == "producer") {
@@ -121,6 +126,8 @@ object ShuffleRecoveryCelebornColdProcess {
           case Left(reason) => missReason = reason
         }
       }
+      val preparationNanos = System.nanoTime() - preparationStarted
+      val executionStarted = System.nanoTime()
       sc.submitMapStage(dependency).get()
       if (publication != null) {
         val manifest = publication.finish()
@@ -130,6 +137,19 @@ object ShuffleRecoveryCelebornColdProcess {
           s"$application\n$shuffle\n".getBytes(UTF_8), StandardOpenOption.CREATE_NEW)
       }
       val adoptedBeforeRead = adoption != null && adoption.isAdopted
+      if (control == "concurrent") {
+        require(adoptedBeforeRead, "concurrent reader must hold an adopted claim")
+        Files.write(Paths.get(root, Paths.get(evidence).getFileName.toString + ".ready"),
+          Array[Byte](1), StandardOpenOption.CREATE_NEW)
+        val peers = Seq("concurrent-a", "concurrent-b").map { name =>
+          Paths.get(root, name + ".properties.ready")
+        }
+        val deadline = System.nanoTime() + 120000000000L
+        while (!peers.forall(Files.exists(_)) && System.nanoTime() < deadline) {
+          Thread.sleep(100L)
+        }
+        require(peers.forall(Files.exists(_)), "both readers must hold claims concurrently")
+      }
       if (control == "artifact-loss") {
         require(adoptedBeforeRead && tasks.count.get() == 0L,
           "fault must happen after adoption and before ordinary maps run")
@@ -150,8 +170,9 @@ object ShuffleRecoveryCelebornColdProcess {
       require(rows.sameElements((0L until 32L).toArray), "result differs from exact fixture")
       sc.listenerBus.waitUntilEmpty(30000L)
       val adoptedAfterRead = adoption != null && adoption.isAdopted
-      if (role == "replacement" && control == "none") {
-        require(offered && adoptedBeforeRead && adoptedAfterRead && tasks.count.get() == 0L,
+      if (role == "replacement" && Set("none", "concurrent").contains(control)) {
+        require(offered && adoptedBeforeRead && adoptedAfterRead && tasks.count.get() == 0L &&
+          tasks.remoteBytesRead.get() > 0L,
           "replacement must read the adopted shuffle without launching target map tasks")
       } else if (control == "artifact-loss") {
         require(offered && adoptedBeforeRead && !adoptedAfterRead &&
@@ -172,6 +193,9 @@ object ShuffleRecoveryCelebornColdProcess {
         "rowCount" -> rows.length.toString, "resultDigest" -> digest,
         "mapTaskCount" -> tasks.count.get().toString,
         "fetchFailures" -> tasks.fetchFailures.get().toString,
+        "remoteBytesRead" -> tasks.remoteBytesRead.get().toString,
+        "preparationNanos" -> preparationNanos.toString,
+        "executionNanos" -> (System.nanoTime() - executionStarted).toString,
         "adoptedBeforeRead" -> adoptedBeforeRead.toString,
         "offered" -> offered.toString, "adopted" -> adoptedAfterRead.toString,
         "missReason" -> missReason)
