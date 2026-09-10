@@ -216,3 +216,23 @@ This is the publication contract and storage implementation. A provider callback
 preparation and installation, SQL integration, and renewal/invalidation wiring are still required
 for an executed native recovery path. The new regression suites are written, not run. No native
 end-to-end success is claimed by the manifest codec or its publication backend.
+
+### Celeborn publication attachment
+
+The development integration under `dev/shuffle-recovery/celeborn-native-spike` implements the
+native publication provider against the Celeborn fork. It checks that accepted stage/task attempt
+coordinates fit Celeborn's 16-bit fields before encoding them. Its provider read-format ID pins
+the native framing implementation and includes the configured compression codec; Spark row and
+serializer compatibility remain separate certified identity fields.
+
+`ShuffleRecoveryCelebornPublication.attach` takes the context produced for a certified exchange
+and installs the generic native listener on the actual driver. The listener tracks only the
+selected shuffle and delegates sealing and persistence to the bounded publisher worker.
+After map-stage completion, the session's `finish` drains queued listener events and publication,
+then requires a manifest matching this generation and incarnation. It cannot report an older
+compatible manifest as this producer's successful publication. This attachment must run before
+the map stage starts and finish before producer shutdown or shuffle cleanup.
+
+The adapter sources deliberately live outside Core and require both fork artifacts when compiled.
+They are not loaded by ordinary Spark execution. Native consumer installation and the cold-process
+runner still need wiring; the attachment is not yet an executed integration test.
