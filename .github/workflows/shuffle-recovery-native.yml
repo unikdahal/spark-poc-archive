@@ -1,0 +1,98 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: Native shuffle recovery proof
+
+on:
+  push:
+    tags: ['shuffle-recovery-native/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-shuffle-recovery
+  cancel-in-progress: false
+
+jobs:
+  dependencies:
+    strategy:
+      fail-fast: false
+      matrix:
+        dependency: [celeborn, iceberg]
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v6
+        with: {persist-credentials: false}
+      - uses: actions/setup-java@v5
+        with: {distribution: zulu, java-version: 17}
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: native-dependencies-${{ matrix.dependency }}-${{ runner.os }}-${{ hashFiles('dev/shuffle-recovery/celeborn-native-spike/build-dependencies.sh') }}
+          restore-keys: native-dependencies-${{ matrix.dependency }}-${{ runner.os }}-
+      - name: Build pinned provider or source
+        run: bash dev/shuffle-recovery/celeborn-native-spike/build-dependencies.sh "$RUNNER_TEMP/deps" '${{ matrix.dependency }}'
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: native-${{ matrix.dependency }}
+          path: |
+            ${{ runner.temp }}/deps/*.tgz
+            ${{ runner.temp }}/deps/*.jar
+            ${{ runner.temp }}/deps/*.commit
+            ${{ runner.temp }}/deps/*.log
+          if-no-files-found: error
+  proof:
+    needs: dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+        with: {persist-credentials: false}
+      - uses: actions/setup-java@v5
+        with: {distribution: zulu, java-version: 17}
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.sbt
+            ~/.cache/coursier
+            build/apache-maven-*
+            build/*.jar
+          key: native-spark-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties') }}
+          restore-keys: shuffle-recovery-experimental-sql-${{ runner.os }}-
+      - uses: actions/download-artifact@v8
+        with: {pattern: 'native-*', path: '${{ runner.temp }}/deps', merge-multiple: true}
+      - name: Run native cold-process proof
+        run: |
+          tar -C "$RUNNER_TEMP/deps" -xzf "$RUNNER_TEMP/deps/celeborn-dist.tgz"
+          export CELEBORN_HOME="$RUNNER_TEMP/deps/dist"
+          export ICEBERG_RUNTIME_JAR="$RUNNER_TEMP/deps/iceberg-runtime.jar"
+          export CELEBORN_RUNTIME_JAR="$(find "$CELEBORN_HOME/spark" -name '*.jar' -print -quit)"
+          python3 dev/shuffle-recovery/celeborn-native-spike/services.py "$RUNNER_TEMP/native-proof"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: native-proof-evidence
+          path: |
+            ${{ runner.temp }}/native-proof
+            **/target/test-reports/*ShuffleRecovery*.xml
+          if-no-files-found: error

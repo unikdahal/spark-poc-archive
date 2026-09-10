@@ -71,6 +71,7 @@ object ShuffleRecoveryCelebornColdProcess {
         .config("spark.celeborn.columnarShuffle.enabled", "false")
         .config("spark.io.encryption.enabled", "false")
         .config("spark.celeborn.client.shuffle.compression.codec", "lz4")
+        .config("spark.celeborn.client.push.replicate.enabled", "false")
     }
     val spark = builder.getOrCreate()
     var publication: ShuffleRecoveryCelebornPublicationSession = null
