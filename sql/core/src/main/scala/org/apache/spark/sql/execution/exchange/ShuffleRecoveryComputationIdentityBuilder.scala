@@ -348,7 +348,8 @@ private[sql] object ShuffleRecoveryComputationIdentityBuilder {
         "spark.io.compression.lz4.blockSize" -> compressionBlockSize,
         "spark.io.encryption.enabled" -> runtime.ioEncryptionEnabled.toString)
       val compatibility = ShuffleRecoveryCompatibility(
-        ShuffleRecoveryComputationIdentity.SparkCompatibilityId,
+        ShuffleRecoveryComputationIdentity.SparkCompatibilityId
+          .getOrElse(fail(UnsupportedShuffleMode)),
         ShuffleWriteFormatId,
         inputs.providerReadFormatId)
       val identity = ShuffleRecoveryComputationIdentity.create(

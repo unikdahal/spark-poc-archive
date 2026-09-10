@@ -35,6 +35,21 @@ class ShuffleRecoveryComputationIdentitySuite extends SparkFunSuite {
     assert(ShuffleRecoveryComputationIdentityCodec.decode(payload) === identity)
   }
 
+  test("runtime build compatibility refuses unknown revisions and separates builds") {
+    val first = ShuffleRecoveryComputationIdentity.buildCompatibilityId("a" * 40).get
+    val second = ShuffleRecoveryComputationIdentity.buildCompatibilityId("b" * 40).get
+    assert(first != second)
+    val base = baseIdentity()
+    val firstBuild = base.copy(
+      compatibility = base.compatibility.copy(sparkCompatibilityId = first))
+    val secondBuild = base.copy(
+      compatibility = base.compatibility.copy(sparkCompatibilityId = second))
+    assert(firstBuild.canonicalPayload != secondBuild.canonicalPayload)
+    Seq(null, "", "<unknown>", "abcdef", "a" * 40 + "-dirty").foreach { revision =>
+      assert(ShuffleRecoveryComputationIdentity.buildCompatibilityId(revision).isEmpty)
+    }
+  }
+
   test("certified batch source operator survives canonical encoding") {
     val base = baseIdentity()
     val identity = base.copy(producer = ShuffleRecoveryOperatorNode(
@@ -332,7 +347,7 @@ private[shuffle] object ShuffleRecoveryComputationIdentityTestData {
         "spark.sql.session.timeZone" -> "UTC",
         "spark.sql.ansi.enabled" -> "false"),
       ShuffleRecoveryCompatibility(
-        ShuffleRecoveryComputationIdentity.SparkCompatibilityId,
+        "spark-2a7cfea06ba135cf0ddc62902eb0daf5a835c672-shuffle-recovery-identity-v2",
         "spark-sort-shuffle-unsafe-row-v1",
         "reference-shuffle-provider-v1"))
   }

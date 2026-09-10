@@ -61,8 +61,16 @@ private[spark] final case class ShuffleRecoveryComputationIdentity private[shuff
 private[spark] object ShuffleRecoveryComputationIdentity {
   val EncodingVersion: Int = 2
 
-  private[spark] val SparkCompatibilityId =
-    "spark-2a7cfea06ba135cf0ddc62902eb0daf5a835c672-shuffle-recovery-identity-v2"
+  private[spark] val SparkCompatibilityId: Option[String] =
+    buildCompatibilityId(org.apache.spark.SPARK_REVISION)
+
+  private[shuffle] def buildCompatibilityId(revision: String): Option[String] = {
+    if (revision != null && revision.matches("[0-9a-f]{40}|[0-9a-f]{64}")) {
+      Some(s"spark-$revision-shuffle-recovery-identity-v2")
+    } else {
+      None
+    }
+  }
 
   private[spark] def create(
       outputContract: ShuffleRecoveryOutputContract,
@@ -701,8 +709,10 @@ private[spark] object ShuffleRecoveryComputationIdentityCodec {
     validateText(compatibility.sparkCompatibilityId, "Spark compatibility id")
     validateText(compatibility.shuffleWriteFormatId, "shuffle write format id")
     validateText(compatibility.providerReadFormatId, "provider read format id")
-    if (compatibility.sparkCompatibilityId !=
-        ShuffleRecoveryComputationIdentity.SparkCompatibilityId) {
+    // The codec may decode a manifest from an older build. Adoption compares its complete
+    // identity with the current builder's revision-bound identity; parsing is structural only.
+    if (!compatibility.sparkCompatibilityId.matches(
+        "spark-(?:[0-9a-f]{40}|[0-9a-f]{64})-shuffle-recovery-identity-v2")) {
       throw new IllegalArgumentException("unexpected Spark compatibility id")
     }
   }
