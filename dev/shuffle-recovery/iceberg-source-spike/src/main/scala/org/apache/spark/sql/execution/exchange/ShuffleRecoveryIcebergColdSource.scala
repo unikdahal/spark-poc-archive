@@ -31,6 +31,14 @@ import org.apache.spark.sql.functions.{col, lit}
 class ShuffleRecoveryIcebergColdSource extends ShuffleRecoveryColdProcessSource {
   private var prepared: Option[(ShuffleExchangeExec, ShuffleRecoveryCanonicalInputs)] = None
 
+  private var providerFormat = ShuffleRecoveryFeasibilityIdentity.ProviderCompatibilityId
+
+  def configureProviderReadFormat(value: String): Unit = {
+    require(prepared.isEmpty, "configure the provider before planning the query")
+    require(value != null && value.nonEmpty)
+    providerFormat = value
+  }
+
   override def sessionOptions: Map[String, String] = Map(
     "spark.sql.catalog.cold" -> "org.apache.iceberg.spark.SparkCatalog",
     "spark.sql.catalog.cold.type" -> "hadoop",
@@ -53,7 +61,7 @@ class ShuffleRecoveryIcebergColdSource extends ShuffleRecoveryColdProcessSource 
     // Capture the planning event before inspecting the plan. Only this adapter instance keeps
     // the certificate; each replacement JVM independently resolves and certifies its read.
     val inputs = ShuffleRecoveryIcebergSourceSpike.canonicalInputs(
-      query, ShuffleRecoveryFeasibilityIdentity.ProviderCompatibilityId)
+      query, providerFormat)
     val exchanges = query.queryExecution.executedPlan.collect {
       case exchange: ShuffleExchangeExec => exchange
     }

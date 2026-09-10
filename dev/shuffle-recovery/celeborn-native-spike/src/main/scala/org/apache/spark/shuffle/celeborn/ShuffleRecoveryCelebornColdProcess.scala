@@ -1,0 +1,155 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.spark.shuffle.celeborn
+
+import java.nio.charset.StandardCharsets.UTF_8
+import java.nio.file.{Files, Paths, StandardOpenOption}
+import java.security.MessageDigest
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+
+import org.apache.spark.scheduler._
+import org.apache.spark.shuffle._
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleRecoveryIcebergColdSource}
+
+/** Each invocation is one independent driver. The shell runner owns durable services and files. */
+object ShuffleRecoveryCelebornColdProcess {
+  private class TargetTasks(rddId: Int) extends SparkListener {
+    private val stages = ConcurrentHashMap.newKeySet[Integer]()
+    val count = new AtomicLong()
+    override def onStageSubmitted(event: SparkListenerStageSubmitted): Unit = {
+      if (event.stageInfo.rddInfos.exists(_.id == rddId)) stages.add(event.stageInfo.stageId)
+    }
+    override def onTaskStart(event: SparkListenerTaskStart): Unit = {
+      if (stages.contains(event.stageId)) count.incrementAndGet()
+    }
+  }
+
+  def main(args: Array[String]): Unit = {
+    require(args.length == 5, "role manifestRoot evidence group control")
+    val Array(role, root, evidence, group, control) = args
+    require(Set("baseline", "producer", "replacement").contains(role))
+    require(Set("none", "source-token", "manifest-missing", "source-snapshot",
+      "producer-filter").contains(control))
+    require(role == "replacement" || control == "none")
+    val source = new ShuffleRecoveryIcebergColdSource
+    val builder = SparkSession.builder().master("local[2]")
+      .appName("celeborn-cold-" + role)
+      .config("spark.ui.enabled", "false")
+      .config("spark.sql.adaptive.enabled", "false")
+      .config("spark.shuffle.useOldFetchProtocol", "false")
+      .config("spark.driver.host", "127.0.0.1")
+      .config("spark.driver.bindAddress", "127.0.0.1")
+    source.sessionOptions.foreach { case (key, value) => builder.config(key, value) }
+    if (role != "baseline") {
+      builder.config("spark.shuffle.manager", classOf[ShuffleRecoveryCelebornManager].getName)
+        .config("spark.celeborn.retainedShuffle.endpointFile",
+          sys.env("CELEBORN_RETAINED_ENDPOINT_FILE"))
+        .config("spark.celeborn.client.spark.shuffle.fallback.policy", "NEVER")
+        .config("spark.celeborn.client.spark.stageRerun.enabled", "false")
+        .config("spark.celeborn.client.spark.fetch.cleanFailedShuffle", "false")
+        .config("spark.celeborn.client.adaptive.optimizeSkewedPartitionRead.enabled", "false")
+        .config("spark.celeborn.client.spark.shuffle.getReducerFileGroup.broadcast.enabled",
+          "false")
+        .config("spark.celeborn.columnarShuffle.enabled", "false")
+        .config("spark.io.encryption.enabled", "false")
+        .config("spark.celeborn.client.shuffle.compression.codec", "lz4")
+    }
+    val spark = builder.getOrCreate()
+    var publication: ShuffleRecoveryCelebornPublicationSession = null
+    var adoption: ShuffleRecoveryCelebornAdoptionSession = null
+    try {
+      val sc = spark.sparkContext
+      val format = ShuffleRecoveryCelebornPublicationProvider.readFormatId(
+        SparkUtils.fromSparkConf(sc.getConf))
+      source.configureProviderReadFormat(format)
+      val query = source.buildQuery(spark, 32L, 4, 4, 0)
+      val exchanges = query.queryExecution.executedPlan.collect {
+        case exchange: ShuffleExchangeExec => exchange
+      }
+      require(exchanges.size == 1)
+      val exchange = exchanges.head
+      val dependency = exchange.shuffleDependency
+      val target = ShuffleRecoveryAdoptionTarget(
+        ShuffleRecoveryMaterializationId(exchange.id, 1L), exchange.shuffleId,
+        dependency.rdd.id.toLong, exchange.numMappers, exchange.numPartitions)
+      val inputs = source.identityInputs(exchange,
+        if (control == "source-token") "different-source" else "fixture", format)
+      val tasks = new TargetTasks(dependency.rdd.id)
+      sc.addSparkListener(tasks)
+      var offered = false
+      var missReason = ""
+      if (role == "producer") {
+        val context = ShuffleRecoveryNativePublicationContext(group, 1L,
+          UUID.randomUUID().toString, exchange.shuffleId,
+          inputs.identityFor(target).asInstanceOf[ShuffleRecoveryCanonicalManifestIdentity])
+        publication = ShuffleRecoveryCelebornPublication.attach(sc, context, Paths.get(root),
+          3600000L)
+      } else if (role == "replacement") {
+        val manifestRoot = if (control == "manifest-missing") {
+          Files.createTempDirectory(Paths.get(root), "empty-")
+        } else Paths.get(root)
+        ShuffleRecoveryCelebornPreparation.prepare(sc,
+          ShuffleRecoveryPreparationRequest(group, 2L, target, inputs),
+          manifestRoot, 60000L) match {
+          case Right(session) => adoption = session; offered = true
+          case Left(reason) => missReason = reason
+        }
+      }
+      sc.submitMapStage(dependency).get()
+      if (publication != null) publication.finish()
+      val adoptedBeforeRead = adoption != null && adoption.isAdopted
+      val rows = query.collect().map { row =>
+        require(row.length == 3 && !row.anyNull)
+        require(row.getLong(0) == row.getLong(1) && row.getString(2).isEmpty)
+        row.getLong(0)
+      }.sorted
+      require(rows.sameElements((0L until 32L).toArray), "result differs from exact fixture")
+      sc.listenerBus.waitUntilEmpty(30000L)
+      val adoptedAfterRead = adoption != null && adoption.isAdopted
+      if (role == "replacement" && control == "none") {
+        require(offered && adoptedBeforeRead && adoptedAfterRead && tasks.count.get() == 0L,
+          "replacement must read the adopted shuffle without launching target map tasks")
+      } else {
+        require(!adoptedBeforeRead && !adoptedAfterRead && tasks.count.get() > 0L,
+          "baseline, producer and negative controls must execute target map tasks")
+        if (role == "replacement") require(!offered, "negative control unexpectedly matched")
+      }
+      val digest = MessageDigest.getInstance("SHA-256")
+        .digest(rows.mkString("\n").getBytes(UTF_8)).map(b => f"${b & 0xff}%02x").mkString
+      val process = ProcessHandle.current()
+      val record = Seq("role" -> role, "control" -> control,
+        "pid" -> process.pid().toString,
+        "started" -> process.info().startInstant().get().toString,
+        "testedCommit" -> sys.env("SPARK_RECOVERY_TESTED_COMMIT"),
+        "rowCount" -> rows.length.toString, "resultDigest" -> digest,
+        "mapTaskCount" -> tasks.count.get().toString,
+        "offered" -> offered.toString, "adopted" -> adoptedAfterRead.toString,
+        "missReason" -> missReason)
+      Files.write(Paths.get(evidence), record.map { case (k, v) => s"$k=$v" }
+        .mkString("", "\n", "\n").getBytes(UTF_8), StandardOpenOption.CREATE_NEW)
+    } finally {
+      try {
+        if (adoption != null) adoption.close()
+        if (publication != null) publication.close()
+      } finally spark.stop()
+    }
+  }
+}
