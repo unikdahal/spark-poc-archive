@@ -71,6 +71,25 @@ class MapOutputTrackerSuite extends SparkFunSuite with LocalSparkContext {
     assert(!shuffle.matchesMapOutputSelection(Vector(103L, 102L)))
   }
 
+  test("native output statistics are captured only for the exact accepted winner vector") {
+    val shuffle = new ShuffleStatus(2)
+    val location = BlockManagerId("executor", "host", 1000)
+    val first = MapStatus(location, Array(0L, 100L), 101L)
+    val second = MapStatus(location, Array(200L, 0L), 102L)
+    shuffle.addMapOutput(0, first)
+    assert(shuffle.captureNativeMapOutputs(Vector(101L, 102L), 2).isEmpty)
+    shuffle.addMapOutput(1, second)
+    val outputs = shuffle.captureNativeMapOutputs(Vector(101L, 102L), 2).get
+    assert(outputs.map(_.mapTaskId) == Vector(101L, 102L))
+    assert(outputs.map(_.reducerBytes) == Vector(
+      Vector(0L, first.getSizeForBlock(1)), Vector(second.getSizeForBlock(0), 0L)))
+    assert(shuffle.captureNativeMapOutputs(Vector(102L, 101L), 2).isEmpty)
+    assert(shuffle.captureNativeMapOutputs(Vector(101L, 102L), 131073).isEmpty)
+    shuffle.removeMapOutput(0, location)
+    assert(shuffle.captureNativeMapOutputs(Vector(101L, 102L), 2).isEmpty)
+    assert(outputs.head.mapTaskId == 101L)
+  }
+
   test("master start and stop") {
     val rpcEnv = createRpcEnv("test")
     val tracker = newTrackerMaster()

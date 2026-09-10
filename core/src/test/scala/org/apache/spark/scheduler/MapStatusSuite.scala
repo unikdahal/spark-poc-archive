@@ -35,6 +35,19 @@ import org.apache.spark.util.collection.Utils.createArray
 class MapStatusSuite extends SparkFunSuite {
   private def doReturn(value: Any) = org.mockito.Mockito.doReturn(value, Seq.empty: _*)
 
+  test("native recovery status preserves scheduling estimates through serialization") {
+    val location = BlockManagerId("native-binding", "host", 1000)
+    val estimates = Vector(0L, 102L, 10000001L)
+    val status = new ShuffleRecoveryNativeMapStatus(location, estimates, 123L)
+    val restored = compressAndDecompressMapStatus(status)
+    assert(restored.location == location)
+    assert(restored.mapId == 123L)
+    assert(estimates.indices.map(restored.getSizeForBlock).toVector == estimates)
+    intercept[IllegalArgumentException] {
+      new ShuffleRecoveryNativeMapStatus(location, Vector(-1L), 123L)
+    }
+  }
+
   test("compressSize") {
     assert(MapStatus.compressSize(0L) === 0)
     assert(MapStatus.compressSize(1L) === 1)

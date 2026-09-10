@@ -256,3 +256,19 @@ resolver merely to receive scheduler hooks.
 The Celeborn wrapper currently delegates ordinary native reads. A native adoption backend,
 validated scheduler output metadata, executor descriptor installation, and lease-driven failure
 handling remain to be implemented. The wrapper and dispatch changes have not been compiled or run.
+
+### Native scheduling metadata
+
+Native publication now requires a bounded capture of map-output estimates from Spark's accepted
+tracker state after sealing. Capture checks the partition-ordered winner vector under the same
+shuffle read lock used to copy each map's reducer estimates. It preserves zero and nonzero values
+and task IDs. These are Spark scheduling estimates, not assertions about native physical blocks.
+The provider descriptor still determines the actual stream contents and native mapper filtering.
+
+Manifests carrying these estimates use format three; formats one and two remain readable. Dense
+scheduling metadata is capped at 131072 mapper/reducer cells independently of the provider byte
+limit. This is a PoC size gate, not a scalable compact statistics protocol. Publication beyond the
+gate is skipped rather than inventing sizes. `ShuffleRecoveryNativeMapStatus` restores the captured
+estimates without applying another lossy compression pass and validates its serialized lengths.
+The class is intended for the native adoption transaction; it is not yet installed by that path.
+Tracker capture and manifest regression tests are written but remain unexecuted.

@@ -17,7 +17,17 @@
 
 package org.apache.spark.shuffle
 
-/** Provider encoding remains outside Core, including translation of accepted attempt coordinates. */
+/** Scheduling estimates from accepted outputs, distinct from physical stream offsets. */
+private[spark] final case class ShuffleRecoveryNativeMapOutput(
+    mapTaskId: Long,
+    reducerBytes: Vector[Long])
+
+private[spark] object ShuffleRecoveryNativeMapOutput {
+  // Bound the dense scheduling metadata independently of native provider descriptor size.
+  val MaxCells = 131072
+}
+
+/** Providers translate accepted attempt coordinates into their native encoding outside Core. */
 private[spark] trait ShuffleRecoveryNativePublicationProvider {
   def compatibilityId: String
   def seal(
@@ -38,9 +48,11 @@ private[spark] final class ShuffleRecoveryNativePublicationBackend(
     context: ShuffleRecoveryNativePublicationContext,
     provider: ShuffleRecoveryNativePublicationProvider,
     store: ShuffleRecoveryManifestStore,
-    currentSelection: ShuffleRecoveryPublication => Boolean)
+    currentSelection: ShuffleRecoveryPublication => Boolean,
+    captureOutputs: ShuffleRecoveryPublication => Option[Vector[ShuffleRecoveryNativeMapOutput]])
   extends ShuffleRecoveryPublicationBackend {
-  require(context != null && provider != null && store != null && currentSelection != null)
+  require(context != null && provider != null && store != null &&
+    currentSelection != null && captureOutputs != null)
   ShuffleRecoveryManifestCodec.validateIdentifier(context.recoveryGroup, "recovery group")
   ShuffleRecoveryManifestCodec.validateIdentifier(context.incarnationId, "incarnation id")
   require(context.generation > 0L && context.targetShuffleId >= 0)
@@ -68,10 +80,13 @@ private[spark] final class ShuffleRecoveryNativePublicationBackend(
       descriptor.size <= ShuffleRecoveryManifestCodec.MaxNativeDescriptorBytes,
       "native publication returned an invalid descriptor")
     require(currentSelection(publication), "mapper selection changed during native sealing")
+    val outputs = captureOutputs(publication)
+      .getOrElse(throw new IllegalStateException("accepted native output statistics unavailable"))
+    require(outputs.map(_.mapTaskId) == ids, "native output statistics changed mapper selection")
     val manifest = ShuffleRecoveryManifest(context.recoveryGroup, context.generation,
       context.incarnationId, context.identity, context.identity.mapperCount,
       context.identity.reducerCount, Vector.empty, ShuffleRecoveryManifest.DescriptorVersion,
-      None, System.currentTimeMillis(), Some(descriptor))
+      None, System.currentTimeMillis(), Some(descriptor), Some(outputs))
     store.publish(manifest)
   }
 }

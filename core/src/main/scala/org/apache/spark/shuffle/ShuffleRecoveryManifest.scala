@@ -142,11 +142,13 @@ private[spark] final case class ShuffleRecoveryManifest(
     descriptorVersion: Int,
     reducerBytes: Option[Vector[Long]],
     publicationTimestampMillis: Long,
-    nativeDescriptor: Option[Vector[Byte]] = None)
+    nativeDescriptor: Option[Vector[Byte]] = None,
+    nativeMapOutputs: Option[Vector[ShuffleRecoveryNativeMapOutput]] = None)
 
 private[spark] object ShuffleRecoveryManifest {
   val FormatVersion = 1
   val NativeFormatVersion = 2
+  val NativeStatisticsFormatVersion = 3
   val DescriptorVersion = 1
 }
 
@@ -235,7 +237,9 @@ private[spark] object ShuffleRecoveryManifestCodec {
     val bytes = new ByteArrayOutputStream(estimated)
     val out = new DataOutputStream(bytes)
     out.writeInt(Magic)
-    out.writeInt(if (manifest.nativeDescriptor.isDefined) {
+    out.writeInt(if (manifest.nativeMapOutputs.isDefined) {
+      ShuffleRecoveryManifest.NativeStatisticsFormatVersion
+    } else if (manifest.nativeDescriptor.isDefined) {
       ShuffleRecoveryManifest.NativeFormatVersion
     } else {
       ShuffleRecoveryManifest.FormatVersion
@@ -267,6 +271,12 @@ private[spark] object ShuffleRecoveryManifestCodec {
       case None => out.writeBoolean(false)
     }
     out.writeLong(manifest.publicationTimestampMillis)
+    manifest.nativeMapOutputs.foreach { outputs =>
+      outputs.foreach { output =>
+        out.writeLong(output.mapTaskId)
+        output.reducerBytes.foreach(out.writeLong)
+      }
+    }
     manifest.nativeDescriptor.foreach { descriptor =>
       writeBytes(out, descriptor.toArray, MaxNativeDescriptorBytes, "native descriptor")
     }
@@ -288,7 +298,10 @@ private[spark] object ShuffleRecoveryManifestCodec {
         throw new IOException("invalid manifest magic")
       }
       val formatVersion = in.readInt()
-      val native = formatVersion == ShuffleRecoveryManifest.NativeFormatVersion
+      val hasNativeStatistics =
+        formatVersion == ShuffleRecoveryManifest.NativeStatisticsFormatVersion
+      val native =
+        formatVersion == ShuffleRecoveryManifest.NativeFormatVersion || hasNativeStatistics
       if (formatVersion != ShuffleRecoveryManifest.FormatVersion && !native) {
         throw new IOException(s"unsupported manifest version: $formatVersion")
       }
@@ -355,6 +368,18 @@ private[spark] object ShuffleRecoveryManifestCodec {
         None
       }
       val publicationTimestampMillis = in.readLong()
+      val nativeMapOutputs = if (hasNativeStatistics) {
+        val cells = mapperCount.toLong * reducerCount
+        val requiredBytes = 8L * (cells + mapperCount)
+        if (cells > ShuffleRecoveryNativeMapOutput.MaxCells || requiredBytes > in.available()) {
+          throw new IOException("native map statistics exceed allocation budget")
+        }
+        Some(Vector.fill(mapperCount) {
+          ShuffleRecoveryNativeMapOutput(in.readLong(), Vector.fill(reducerCount)(in.readLong()))
+        })
+      } else {
+        None
+      }
       val nativeDescriptor = if (native) {
         Some(readBytes(in, MaxNativeDescriptorBytes, "native descriptor").toVector)
       } else {
@@ -375,7 +400,8 @@ private[spark] object ShuffleRecoveryManifestCodec {
         descriptorVersion,
         reducerBytes,
         publicationTimestampMillis,
-        nativeDescriptor)
+        nativeDescriptor,
+        nativeMapOutputs)
       validateManifest(manifest)
       manifest
     } catch {
@@ -409,6 +435,20 @@ private[spark] object ShuffleRecoveryManifestCodec {
     }
     if (manifest.descriptorVersion != ShuffleRecoveryManifest.DescriptorVersion) {
       throw new IllegalArgumentException("unsupported provider descriptor version")
+    }
+    manifest.nativeMapOutputs.foreach { outputs =>
+      if (manifest.nativeDescriptor.isEmpty || outputs == null ||
+          outputs.size != manifest.mapperCount ||
+          manifest.mapperCount.toLong * manifest.reducerCount >
+            ShuffleRecoveryNativeMapOutput.MaxCells) {
+        throw new IllegalArgumentException("invalid native map statistics shape")
+      }
+      if (outputs.exists(output => output == null || output.mapTaskId < 0L ||
+          output.reducerBytes == null || output.reducerBytes.size != manifest.reducerCount ||
+          output.reducerBytes.exists(_ < 0L)) ||
+          outputs.map(_.mapTaskId).distinct.size != outputs.size) {
+        throw new IllegalArgumentException("invalid native map statistics values")
+      }
     }
     manifest.mapArtifacts.zipWithIndex.foreach { case (artifact, expectedMapIndex) =>
       if (artifact.mapIndex != expectedMapIndex) {
@@ -535,6 +575,9 @@ private[spark] object ShuffleRecoveryManifestCodec {
     }
     manifest.reducerBytes.foreach { values =>
       add(4L + Math.multiplyExact(values.size.toLong, 8L))
+    }
+    manifest.nativeMapOutputs.foreach { _ =>
+      add(8L * manifest.mapperCount * (manifest.reducerCount.toLong + 1L))
     }
     manifest.nativeDescriptor.foreach(descriptor => add(4L + descriptor.size))
     size.toInt

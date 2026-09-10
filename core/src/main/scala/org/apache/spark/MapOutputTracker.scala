@@ -40,7 +40,7 @@ import org.apache.spark.internal.config._
 import org.apache.spark.io.CompressionCodec
 import org.apache.spark.rpc.{RpcCallContext, RpcEndpoint, RpcEndpointRef, RpcEnv}
 import org.apache.spark.scheduler.{MapStatus, MergeStatus, ShuffleOutputStatus}
-import org.apache.spark.shuffle.MetadataFetchFailedException
+import org.apache.spark.shuffle.{MetadataFetchFailedException, ShuffleRecoveryNativeMapOutput}
 import org.apache.spark.storage.{BlockId, BlockManagerId, ShuffleBlockId, ShuffleMergedBlockId}
 import org.apache.spark.util._
 import org.apache.spark.util.ArrayImplicits._
@@ -274,6 +274,23 @@ private class ShuffleStatus(
         status != null && status.mapId == expected(index)
       }
   }
+
+  /** Capture bounded scheduling estimates from the same partition-ordered winner observation. */
+  private[spark] def captureNativeMapOutputs(
+      expected: Vector[Long],
+      reducerCount: Int): Option[Vector[ShuffleRecoveryNativeMapOutput]] =
+    withReadLock {
+      if (expected == null || reducerCount <= 0 ||
+          expected.size.toLong * reducerCount > ShuffleRecoveryNativeMapOutput.MaxCells ||
+          !matchesMapOutputSelection(expected)) {
+        None
+      } else {
+        Some(mapStatuses.toVector.map { status =>
+          ShuffleRecoveryNativeMapOutput(status.mapId,
+            Vector.tabulate(reducerCount)(status.getSizeForBlock))
+        })
+      }
+    }
 
   /**
    * Update the map output location following a shuffle-data migration (e.g. during executor
@@ -1325,6 +1342,13 @@ private[spark] class MapOutputTrackerMaster(
       shuffleId: Int,
       expected: Vector[Long]): Boolean = {
     shuffleStatuses.get(shuffleId).exists(_.matchesMapOutputSelection(expected))
+  }
+
+  private[spark] def captureNativeMapOutputs(
+      shuffleId: Int,
+      expected: Vector[Long],
+      reducerCount: Int): Option[Vector[ShuffleRecoveryNativeMapOutput]] = {
+    shuffleStatuses.get(shuffleId).flatMap(_.captureNativeMapOutputs(expected, reducerCount))
   }
 
   def incrementEpoch(): Unit = {

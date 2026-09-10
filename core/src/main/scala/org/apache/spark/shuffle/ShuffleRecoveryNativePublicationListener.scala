@@ -36,7 +36,9 @@ private[spark] final class ShuffleRecoveryNativePublicationListener(
   private val selectionMatches: ShuffleRecoveryPublication => Boolean = publication =>
     tracker.matchesMapOutputSelection(publication.shuffleId, publication.winningMapTaskIds)
   private val publisher = new ShuffleRecoveryManifestPublisher(
-    new ShuffleRecoveryNativePublicationBackend(context, provider, store, selectionMatches),
+    new ShuffleRecoveryNativePublicationBackend(context, provider, store, selectionMatches,
+      publication => tracker.captureNativeMapOutputs(publication.shuffleId,
+        publication.winningMapTaskIds, publication.reducerCount)),
     queueCapacity)
   private val coordinator = new ShuffleRecoveryPublicationCoordinator(publisher,
     context.identity.reducerCount, Some(context.targetShuffleId), selectionMatches)

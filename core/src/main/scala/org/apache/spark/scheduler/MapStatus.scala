@@ -179,6 +179,54 @@ private[spark] class CompressedMapStatus(
 }
 
 /**
+ * Scheduling estimates restored from a native recovery manifest without recompressing them.
+ * The location identifies an adoption generation; actual reads use the provider descriptor.
+ */
+private[spark] final class ShuffleRecoveryNativeMapStatus() extends MapStatus with Externalizable {
+  private var loc: BlockManagerId = _
+  private var estimates: Array[Long] = _
+  private var taskId: Long = -1L
+
+  def this(location: BlockManagerId, sizes: Vector[Long], mapTaskId: Long) = {
+    this()
+    require(location != null && sizes != null && sizes.nonEmpty &&
+      sizes.size <= org.apache.spark.shuffle.ShuffleRecoveryNativeMapOutput.MaxCells &&
+      sizes.forall(_ >= 0L) && mapTaskId >= 0L)
+    loc = location
+    estimates = sizes.toArray
+    taskId = mapTaskId
+  }
+
+  override def location: BlockManagerId = loc
+  override def mapId: Long = taskId
+  override def getSizeForBlock(reduceId: Int): Long = estimates(reduceId)
+  override def updateLocation(newLoc: BlockManagerId): Unit = {
+    require(newLoc != null)
+    loc = newLoc
+  }
+
+  override def writeExternal(out: ObjectOutput): Unit = Utils.tryOrIOException {
+    loc.writeExternal(out)
+    out.writeLong(taskId)
+    out.writeInt(estimates.length)
+    estimates.foreach(out.writeLong)
+  }
+
+  override def readExternal(in: ObjectInput): Unit = Utils.tryOrIOException {
+    val restoredLocation = BlockManagerId(in)
+    val restoredTaskId = in.readLong()
+    val count = in.readInt()
+    require(restoredTaskId >= 0L && count > 0 &&
+      count <= org.apache.spark.shuffle.ShuffleRecoveryNativeMapOutput.MaxCells)
+    val restored = Array.fill(count)(in.readLong())
+    require(restored.forall(_ >= 0L))
+    loc = restoredLocation
+    taskId = restoredTaskId
+    estimates = restored
+  }
+}
+
+/**
  * A [[MapStatus]] implementation that stores the accurate size of huge blocks, which are larger
  * than spark.shuffle.accurateBlockThreshold. It stores the average size of other non-empty blocks,
  * plus a bitmap for tracking which blocks are empty.

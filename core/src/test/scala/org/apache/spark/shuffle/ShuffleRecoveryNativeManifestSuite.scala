@@ -56,6 +56,23 @@ class ShuffleRecoveryNativeManifestSuite extends SparkFunSuite {
     }
   }
 
+  test("native scheduler statistics preserve zero and nonzero estimates without indexes") {
+    val value = manifest.copy(nativeMapOutputs = Some(Vector(
+      ShuffleRecoveryNativeMapOutput(101L, Vector(0L, 100L)))))
+    val encoded = ShuffleRecoveryManifestCodec.encode(value)
+    assert(ByteBuffer.wrap(encoded).getInt(4) ==
+      ShuffleRecoveryManifest.NativeStatisticsFormatVersion)
+    assert(ShuffleRecoveryManifestCodec.decode(encoded) == value)
+    intercept[IllegalArgumentException] {
+      ShuffleRecoveryManifestCodec.encode(value.copy(nativeMapOutputs = Some(Vector(
+        ShuffleRecoveryNativeMapOutput(101L, Vector(-1L, 100L))))))
+    }
+    intercept[IllegalArgumentException] {
+      ShuffleRecoveryManifestCodec.encode(value.copy(nativeMapOutputs = Some(Vector(
+        ShuffleRecoveryNativeMapOutput(101L, Vector(100L))))))
+    }
+  }
+
   test("indexed manifests retain version one encoding") {
     val value = manifest.copy(nativeDescriptor = None,
       mapArtifacts = Vector(ShuffleRecoveryMapArtifact(0, 1L, "map", 10L, 24L)))
