@@ -34,18 +34,26 @@ import org.apache.spark.scheduler.{SparkListener, SparkListenerApplicationEnd}
 import org.apache.spark.scheduler.{SparkListenerStageCompleted, SparkListenerStageSubmitted}
 import org.apache.spark.scheduler.SparkListenerTaskEnd
 
+/** Scheduler attempt coordinates; each provider applies its own native attempt encoding. */
+private[spark] final case class ShuffleRecoveryMapAttempt(
+    taskId: Long,
+    stageAttemptId: Int,
+    taskAttemptNumber: Int)
+
 /**
  * Immutable map-output selection frozen at a successful shuffle-stage completion boundary.
  *
- * `winningMapTaskIds` is ordered by map partition. Scheduler routing identifiers are diagnostic
- * only and never participate in the feasibility identity.
+ * Both winner vectors are ordered by map partition. Attempt coordinates certify physical output;
+ * they never participate in computation identity. Empty attempt metadata means it was unavailable,
+ * not that every task used attempt zero. Providers requiring it must reject that publication.
  */
 private[spark] final case class ShuffleRecoveryPublication(
     shuffleId: Int,
     stageId: Int,
     stageAttemptId: Int,
     winningMapTaskIds: Vector[Long],
-    reducerCount: Int)
+    reducerCount: Int,
+    winningMapAttempts: Vector[ShuffleRecoveryMapAttempt] = Vector.empty)
 
 private[shuffle] final case class ShuffleRecoveryPublisherConfig(
     providerRoot: Path,
@@ -392,7 +400,8 @@ private[shuffle] final class ShuffleRecoveryPublicationCoordinator(
       expectedMaps: Int,
       var latestAttemptId: Int,
       var active: Boolean,
-      winners: mutable.Map[Int, Long])
+      winners: mutable.Map[Int, Long],
+      attempts: mutable.Map[Int, ShuffleRecoveryMapAttempt])
 
   private val stages = mutable.HashMap.empty[Int, StageState]
 
@@ -434,7 +443,8 @@ private[shuffle] final class ShuffleRecoveryPublicationCoordinator(
             expectedMaps,
             stageAttemptId,
             active = true,
-            mutable.HashMap.empty[Int, Long])
+            mutable.HashMap.empty[Int, Long],
+            mutable.HashMap.empty[Int, ShuffleRecoveryMapAttempt])
         }
     }
   }
@@ -443,7 +453,8 @@ private[shuffle] final class ShuffleRecoveryPublicationCoordinator(
       stageId: Int,
       stageAttemptId: Int,
       partitionId: Int,
-      mapTaskId: Long): Unit = synchronized {
+      mapTaskId: Long,
+      taskAttemptNumber: Int = -1): Unit = synchronized {
     stages.get(stageId).foreach { state =>
       if (state.active &&
           state.latestAttemptId == stageAttemptId &&
@@ -453,6 +464,13 @@ private[shuffle] final class ShuffleRecoveryPublicationCoordinator(
         // MapOutputTracker replaces an existing map status with a later accepted success.
         // Keep the latest listener-ordered success and validate it at the completion boundary.
         state.winners(partitionId) = mapTaskId
+        if (taskAttemptNumber >= 0) {
+          state.attempts(partitionId) =
+            ShuffleRecoveryMapAttempt(mapTaskId, stageAttemptId, taskAttemptNumber)
+        } else {
+          // Legacy callers can certify task IDs only. Never invent provider attempt numbers.
+          state.attempts.remove(partitionId)
+        }
       }
     }
   }
@@ -470,12 +488,21 @@ private[shuffle] final class ShuffleRecoveryPublicationCoordinator(
             (0 until state.expectedMaps).forall(state.winners.contains)
           if (complete) {
             val winners = Vector.tabulate(state.expectedMaps)(state.winners)
+            val attempts = if (state.attempts.size == state.expectedMaps &&
+                winners.indices.forall { index =>
+                  state.attempts.get(index).exists(_.taskId == winners(index))
+                }) {
+              Vector.tabulate(state.expectedMaps)(state.attempts)
+            } else {
+              Vector.empty
+            }
             Some(ShuffleRecoveryPublication(
               state.shuffleId,
               stageId,
               stageAttemptId,
               winners,
-              reducerCount))
+              reducerCount,
+              attempts))
           } else {
             logWarning(
               s"Skipping shuffle recovery publication for stage $stageId.$stageAttemptId: " +
@@ -580,7 +607,8 @@ private[spark] final class ShuffleRecoveryManifestListener private[shuffle] (
           taskEnd.stageId,
           taskEnd.stageAttemptId,
           taskEnd.taskInfo.partitionId,
-          taskEnd.taskInfo.taskId))
+          taskEnd.taskInfo.taskId,
+          taskEnd.taskInfo.attemptNumber))
       }
     }
   }
@@ -621,9 +649,7 @@ private[shuffle] object ShuffleRecoveryManifestListener extends Logging {
     }
     env.mapOutputTracker match {
       case tracker: MapOutputTrackerMaster =>
-        publication.winningMapTaskIds.forall { mapTaskId =>
-          tracker.getMapOutputLocation(publication.shuffleId, mapTaskId).isDefined
-        }
+        tracker.matchesMapOutputSelection(publication.shuffleId, publication.winningMapTaskIds)
       case _ =>
         logWarning(
           "Shuffle recovery publication requires the driver MapOutputTrackerMaster; " +

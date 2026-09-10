@@ -266,6 +266,15 @@ private class ShuffleStatus(
     }
   }
 
+  /** Compare one complete, partition-ordered winner vector under the shuffle's read lock. */
+  private[spark] def matchesMapOutputSelection(expected: Vector[Long]): Boolean = withReadLock {
+    expected != null && expected.size == mapStatuses.length &&
+      mapStatuses.indices.forall { index =>
+        val status = mapStatuses(index)
+        status != null && status.mapId == expected(index)
+      }
+  }
+
   /**
    * Update the map output location following a shuffle-data migration (e.g. during executor
    * decommission).
@@ -1309,6 +1318,13 @@ private[spark] class MapOutputTrackerMaster(
     shuffleStatuses.get(shuffleId).flatMap { shuffleStatus =>
       shuffleStatus.getMapStatus(mapId).map(_.location)
     }
+  }
+
+  /** Validate a publication against a single coherent observation of the registered winners. */
+  private[spark] def matchesMapOutputSelection(
+      shuffleId: Int,
+      expected: Vector[Long]): Boolean = {
+    shuffleStatuses.get(shuffleId).exists(_.matchesMapOutputSelection(expected))
   }
 
   def incrementEpoch(): Unit = {

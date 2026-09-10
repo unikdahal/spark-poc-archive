@@ -53,6 +53,24 @@ class MapOutputTrackerSuite extends SparkFunSuite with LocalSparkContext {
     RpcEnv.create(name, host, port, conf, securityManager)
   }
 
+  test("publication selection matches the complete partition-ordered map output vector") {
+    val shuffle = new ShuffleStatus(2)
+    val location = BlockManagerId("executor", "host", 1000)
+    shuffle.addMapOutput(0, MapStatus(location, Array(10L), 101L))
+    assert(!shuffle.matchesMapOutputSelection(Vector(101L, 102L)))
+    shuffle.addMapOutput(1, MapStatus(location, Array(20L), 102L))
+    assert(shuffle.matchesMapOutputSelection(Vector(101L, 102L)))
+    assert(!shuffle.matchesMapOutputSelection(Vector(102L, 101L)))
+    assert(!shuffle.matchesMapOutputSelection(Vector(101L)))
+    assert(!shuffle.matchesMapOutputSelection(Vector(101L, 101L)))
+    assert(!shuffle.matchesMapOutputSelection(null))
+    shuffle.addMapOutput(0, MapStatus(location, Array(10L), 103L))
+    assert(!shuffle.matchesMapOutputSelection(Vector(101L, 102L)))
+    assert(shuffle.matchesMapOutputSelection(Vector(103L, 102L)))
+    shuffle.removeMapOutput(1, location)
+    assert(!shuffle.matchesMapOutputSelection(Vector(103L, 102L)))
+  }
+
   test("master start and stop") {
     val rpcEnv = createRpcEnv("test")
     val tracker = newTrackerMaster()
