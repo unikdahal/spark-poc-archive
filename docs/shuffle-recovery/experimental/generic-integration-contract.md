@@ -236,3 +236,23 @@ the map stage starts and finish before producer shutdown or shuffle cleanup.
 The adapter sources deliberately live outside Core and require both fork artifacts when compiled.
 They are not loaded by ordinary Spark execution. Native consumer installation and the cold-process
 runner still need wiring; the attachment is not yet an executed integration test.
+
+### Native manager and scheduler hook routing
+
+This Spark branch requires the default shuffle manager to implement `BlockingShuffleManager`.
+The Celeborn artifact still implements the older `ShuffleManager` contract. The development
+adapter `org.apache.spark.shuffle.celeborn.ShuffleRecoveryCelebornManager` delegates ordinary
+writes, reads, cleanup, and block resolution while satisfying the branch's manager interface.
+Use this class for `spark.shuffle.manager` when running the native spike on this branch. The
+publication attachment unwraps its Celeborn delegate explicitly.
+
+Scheduler recovery dispatch now accepts `ShuffleRecoverySchedulerBackendProvider` on a manager.
+The generic backend interface contains the existing local adoption, failure classification,
+whole-stage rollback, and adoption-status hooks. The indexed implementation implements that
+interface and remains reachable through its existing resolver. Its concrete preparation API stays
+available to the reference harness. A native manager no longer needs to manufacture a reference
+resolver merely to receive scheduler hooks.
+
+The Celeborn wrapper currently delegates ordinary native reads. A native adoption backend,
+validated scheduler output metadata, executor descriptor installation, and lease-driven failure
+handling remain to be implemented. The wrapper and dispatch changes have not been compiled or run.

@@ -36,6 +36,7 @@ private[spark] object ShuffleRecoveryCelebornPublication {
     require(sc != null && !sc.isStopped && context != null)
     require(context.generation < Long.MaxValue)
     val manager = sc.env.shuffleManager match {
+      case value: ShuffleRecoveryCelebornManager => value.delegate
       case value: SparkShuffleManager => value
       case _ => throw new IllegalArgumentException("active shuffle manager is not Celeborn")
     }

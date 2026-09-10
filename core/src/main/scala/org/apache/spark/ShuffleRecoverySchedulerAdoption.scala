@@ -39,6 +39,32 @@ private[spark] final case class ShuffleRecoveryFetchFailureInvalidated(
   extends ShuffleRecoveryFetchFailureAction
 
 /**
+ * Local scheduler hooks shared by indexed and native recovery implementations.
+ *
+ * Preparation and provider I/O must finish before these hooks run. Implementations fence by
+ * dependency identity and binding generation, invalidate the whole adopted shuffle on failure,
+ * and report the one-shot rollback requirement before allowing ordinary recomputation.
+ */
+private[spark] trait ShuffleRecoverySchedulerBackend {
+  def beforeFindMissingPartitions(
+      tracker: MapOutputTrackerMaster,
+      dependency: ShuffleDependency[_, _, _],
+      numPartitions: Int): Boolean
+  def handleFetchFailure(
+      tracker: MapOutputTrackerMaster,
+      dependency: ShuffleDependency[_, _, _],
+      blockManagerId: BlockManagerId,
+      taskEpoch: Long): ShuffleRecoveryFetchFailureAction
+  def consumeWholeStageRetryRequirement(shuffleId: Int): Boolean
+  def isAdopted(shuffleId: Int): Boolean
+}
+
+/** A shuffle manager may supply native recovery hooks without using the reference resolver. */
+private[spark] trait ShuffleRecoverySchedulerBackendProvider { self: ShuffleManager =>
+  def shuffleRecoverySchedulerBackend: ShuffleRecoverySchedulerBackend
+}
+
+/**
  * Per-driver state for the feasibility scheduler-adoption transaction.
  *
  * External recovery work ends in [[offerPrepared]] before the DAGScheduler can see the result.
@@ -48,7 +74,8 @@ private[spark] final case class ShuffleRecoveryFetchFailureInvalidated(
  * queued off the scheduler thread.
  */
 private[spark] final class ShuffleRecoverySchedulerAdoptionState(
-    resolver: ShuffleRecoveryIndexShuffleBlockResolver) extends Logging {
+    resolver: ShuffleRecoveryIndexShuffleBlockResolver)
+  extends ShuffleRecoverySchedulerBackend with Logging {
 
   private sealed trait Decision {
     def manager: ShuffleRecoveryReservationManager
@@ -746,9 +773,11 @@ private[spark] final class ShuffleRecoverySchedulerAdoptionState(
 }
 
 private[spark] object ShuffleRecoverySchedulerAdoption {
-  private def state: Option[ShuffleRecoverySchedulerAdoptionState] = {
+  private def state: Option[ShuffleRecoverySchedulerBackend] = {
     Option(SparkEnv.get).flatMap { env =>
       env.shuffleManager match {
+        case manager: ShuffleRecoverySchedulerBackendProvider =>
+          Option(manager.shuffleRecoverySchedulerBackend)
         case manager: BlockingShuffleManager =>
           manager.shuffleBlockResolver match {
             case resolver: ShuffleRecoveryIndexShuffleBlockResolver =>
@@ -780,7 +809,11 @@ private[spark] object ShuffleRecoverySchedulerAdoption {
     state.exists(_.consumeWholeStageRetryRequirement(shuffleId))
   }
 
-  def currentState: Option[ShuffleRecoverySchedulerAdoptionState] = state
+  def currentState: Option[ShuffleRecoverySchedulerAdoptionState] = state.collect {
+    case indexed: ShuffleRecoverySchedulerAdoptionState => indexed
+  }
+
+  def currentBackend: Option[ShuffleRecoverySchedulerBackend] = state
 
   def isAdopted(shuffleId: Int): Boolean = state.exists(_.isAdopted(shuffleId))
 }
