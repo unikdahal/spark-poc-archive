@@ -57,6 +57,20 @@ def main():
         f"celeborn.retainedShuffle.endpointFile {endpoint}",
         "",
     ]))
+    log_config = root / "log4j2.xml"
+    log_config.write_text(
+        '<Configuration><Appenders><Console name="console" target="SYSTEM_OUT">'
+        '<PatternLayout pattern="%d %p %c: %m%n%ex"/></Console></Appenders>'
+        '<Loggers><Root level="info"><AppenderRef ref="console"/></Root></Loggers>'
+        '</Configuration>')
+    # Match the Java module access configured by Celeborn's normal service launchers.
+    opens = ["java.lang", "java.lang.invoke", "java.lang.reflect", "java.io", "java.net",
+             "java.nio", "java.util", "java.util.concurrent", "java.util.concurrent.atomic",
+             "jdk.internal.misc", "sun.nio.ch", "sun.nio.cs", "sun.security.action",
+             "sun.util.calendar"]
+    java_options = [f"--add-opens=java.base/{name}=ALL-UNNAMED" for name in opens]
+    java_options += ["--add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED",
+                     f"-Dlog4j2.configurationFile={log_config}"]
     processes = []
     streams = []
     java = str(Path(os.environ["JAVA_HOME"]) / "bin/java")
@@ -64,9 +78,7 @@ def main():
     def start(name, main_class, extra):
         log = (root / f"{name}.log").open("w")
         streams.append(log)
-        command = [java, "-Xmx768m", "-XX:MaxDirectMemorySize=768m",
-                   "--add-opens=java.base/java.nio=ALL-UNNAMED",
-                   "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+        command = [java, "-Xmx768m", "-XX:MaxDirectMemorySize=768m"] + java_options + [
                    "-cp", f"{home}/conf:{home}/{name}-jars/*:{home}/jars/*",
                    main_class, "--host", "127.0.0.1", "--properties-file", str(conf)] + extra
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)

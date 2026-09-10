@@ -20,7 +20,7 @@ set -euo pipefail
 root="${1:?dependency directory required}"
 mkdir -p "$root"
 root="$(cd "$root" && pwd)"
-celeborn_commit=d154ee0b77bf4e12c9a4ea56376e39341a55f47a
+celeborn_commit=edb413ee3d5e77fbecf43afa7b1a33d6054ab569
 iceberg_commit=e76d63584d7f83b102026749e1ae0f91813cb78e
 fetch_source() {
   local name="$1" url="$2" revision="$3"
@@ -36,6 +36,13 @@ if [[ "${2:-all}" != iceberg ]]; then
     cd "$root/celeborn"
     bash build/make-distribution.sh -Pspark-4.2
   ) 2>&1 | tee "$root/celeborn-build.log"
+  (
+    cd "$root/celeborn"
+    build/mvn -Pspark-4.2 -pl client -am test \
+      -DwildcardSuites=org.apache.celeborn.client.RetainedShuffle
+  ) 2>&1 | tee "$root/celeborn-tests.log"
+  grep -F 'RetainedShuffleLeasesSuite' "$root/celeborn-tests.log"
+  grep -F 'RetainedShuffleDescriptorSuite' "$root/celeborn-tests.log"
   tar -C "$root/celeborn" -czf "$root/celeborn-dist.tgz" dist
 fi
 if [[ "${2:-all}" != celeborn ]]; then
