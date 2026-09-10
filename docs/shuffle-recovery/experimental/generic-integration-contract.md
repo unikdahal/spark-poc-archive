@@ -272,3 +272,27 @@ gate is skipped rather than inventing sizes. `ShuffleRecoveryNativeMapStatus` re
 estimates without applying another lossy compression pass and validates its serialized lengths.
 The class is intended for the native adoption transaction; it is not yet installed by that path.
 Tracker capture and manifest regression tests are written but remain unexecuted.
+
+### Native adoption transaction
+
+`ShuffleRecoveryNativeAdoption` implements the generic scheduler backend for prepared native
+claims. Preparation must first register the exact dependency and materialization reservation.
+An offer validates full identity encoding/digest/payload, earlier generation, provider format,
+shape, descriptor bytes, and native scheduling metadata. It builds the replacement tracker status
+before handing the result to the scheduler. A local installation callback publishes the task
+binding under the same reservation fence as the tracker replacement. Ordinary execution that
+arrives before preparation is ready consumes the opportunity; late preparation is released.
+
+Every binding has a generation-specific location. A fetch failure naming that location fences
+the binding, replaces the entire adopted tracker status with an empty status, advances the epoch,
+and requests whole-stage rollback once. Failures naming older bindings cannot clear a newer
+registration. Cancellation removes pending work and fences adopted bindings. Deferred cleanup uses
+a bounded worker; local invalidation must stop renewal even when the cleanup queue is exhausted,
+so eventual server lease expiry does not depend on that queue draining. The native adoption table
+and generation-location history each have a 256-entry PoC admission limit.
+
+The installation contract is local-only except for close. It does not grant provider implementations
+permission to perform RPCs or wait for streams on the scheduler thread. The Celeborn handle/reader
+implementation still needs to implement this contract. Regression tests cover late preparation,
+cancellation, matching versus stale failures, and the one-shot rollback marker; they are written
+but have not run. This transaction alone is not an end-to-end native read demonstration.

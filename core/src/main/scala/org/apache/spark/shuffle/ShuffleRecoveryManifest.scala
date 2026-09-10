@@ -411,7 +411,7 @@ private[spark] object ShuffleRecoveryManifestCodec {
     }
   }
 
-  private[shuffle] def validateManifest(manifest: ShuffleRecoveryManifest): Unit = {
+  private[spark] def validateManifest(manifest: ShuffleRecoveryManifest): Unit = {
     if (manifest == null) {
       throw new IllegalArgumentException("manifest must not be null")
     }
@@ -477,6 +477,15 @@ private[spark] object ShuffleRecoveryManifestCodec {
     case ShuffleRecoveryComputationIdentity.EncodingVersion =>
       ShuffleRecoveryComputationIdentityCodec.MaxIdentityBytes
     case other => throw new IOException(s"unsupported manifest identity version: $other")
+  }
+
+  private[spark] def identitiesMatch(
+      left: ShuffleRecoveryManifestIdentity,
+      right: ShuffleRecoveryManifestIdentity): Boolean = {
+    validateIdentity(left)
+    validateIdentity(right)
+    left.encodingVersion == right.encodingVersion && left.digest == right.digest &&
+      left.canonicalPayload == right.canonicalPayload
   }
 
   private[shuffle] def validateIdentity(identity: ShuffleRecoveryManifestIdentity): Unit = {
