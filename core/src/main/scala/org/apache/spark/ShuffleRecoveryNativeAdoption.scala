@@ -92,8 +92,9 @@ private[spark] final class ShuffleRecoveryNativeAdoption
     lock.synchronized {
       if (stopped || pending.size + adopted.size + invalidated.size >= 256 ||
           pending.contains(dependency.shuffleId) || adopted.contains(dependency.shuffleId) ||
-          !manager.isCurrent(reservation)) false
-      else {
+          !manager.isCurrent(reservation)) {
+        false
+      } else {
         pending.put(dependency.shuffleId, new Pending(request, manager, reservation, dependency))
         true
       }

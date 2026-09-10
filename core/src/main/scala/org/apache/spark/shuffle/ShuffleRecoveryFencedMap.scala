@@ -64,9 +64,10 @@ private[shuffle] final class ShuffleRecoveryFencedMap(
           if (buffer != null) buffer.foreach { value =>
             if (value != null) value.release()
           }
-        } finally {
-          throw error
+        } catch {
+          case NonFatal(cleanupError) => error.addSuppressed(cleanupError)
         }
+        throw error
     }
   }
 }
