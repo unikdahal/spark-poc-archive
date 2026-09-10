@@ -20,7 +20,7 @@ set -euo pipefail
 root="${1:?dependency directory required}"
 mkdir -p "$root"
 root="$(cd "$root" && pwd)"
-celeborn_commit=4f0f787cba41a04b2b81de9215b4f5e41fb2bbe8
+celeborn_commit=d154ee0b77bf4e12c9a4ea56376e39341a55f47a
 iceberg_commit=e76d63584d7f83b102026749e1ae0f91813cb78e
 fetch_source() {
   local name="$1" url="$2" revision="$3"

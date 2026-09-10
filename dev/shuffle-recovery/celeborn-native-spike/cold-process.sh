@@ -69,6 +69,15 @@ for control in source-token manifest-missing producer-filter; do
   run_child "$control" replacement "$control"
 done
 export SPARK_SHUFFLE_RECOVERY_TEST_PRODUCER_FILTER=false
+python3 dev/shuffle-recovery/celeborn-native-spike/artifact-loss.py \
+  "${work_dir}/manifests" "${evidence_dir}/artifact-loss-files.txt" &
+fault_pid=$!
+if ! run_child artifact-loss replacement artifact-loss; then
+  kill "$fault_pid" 2>/dev/null || true
+  wait "$fault_pid" || true
+  exit 1
+fi
+wait "$fault_pid"
 run_main rewrite "${setup} rewrite ${evidence_dir}/snapshot-after.txt"
 run_child source-snapshot replacement source-snapshot
 
@@ -80,7 +89,7 @@ root = Path(sys.argv[1])
 processes = set()
 records = {}
 for name in ("baseline", "producer", "replacement", "source-token",
-             "manifest-missing", "producer-filter", "source-snapshot"):
+             "manifest-missing", "producer-filter", "source-snapshot", "artifact-loss"):
     row = dict(line.split("=", 1) for line in
                (root / (name + ".properties")).read_text().splitlines())
     process = (row["pid"], row["started"])
@@ -97,7 +106,9 @@ for name, row in records.items():
         assert row["mapTaskCount"] == "0"
     else:
         assert row["adopted"] == "false" and int(row["mapTaskCount"]) > 0, name
+        if name == "artifact-loss":
+            assert row["adoptedBeforeRead"] == "true" and int(row["fetchFailures"]) > 0
 assert (root / "snapshot-before.txt").read_text() != (
     root / "snapshot-after.txt").read_text()
-(root / "decision.txt").write_text("NATIVE_COLD_PROCESS_IDENTITY_CONTROLS_PASS\n")
+(root / "decision.txt").write_text("NATIVE_COLD_PROCESS_AND_ARTIFACT_LOSS_PASS\n")
 CHECK

@@ -49,6 +49,8 @@ if [[ "${module}" == core ]]; then
   if [[ "${provider_publication_discovery}" == true ]]; then
     add_suite org.apache.spark.shuffle.ReferenceShuffleProviderSuite
     add_suite org.apache.spark.shuffle.ShuffleRecoveryManifestSuite
+    add_suite org.apache.spark.shuffle.ShuffleRecoveryNativeManifestSuite
+    add_suite org.apache.spark.shuffle.ShuffleRecoveryPublicationAttemptsSuite
     add_suite org.apache.spark.shuffle.sort.IndexShuffleBlockResolverSuite
     add_suite org.apache.spark.shuffle.sort.SortShuffleManagerSuite
   fi
@@ -63,6 +65,8 @@ if [[ "${module}" == core ]]; then
   if [[ "${scheduler_tracker_reader_aqe_invalidation}" == true ]]; then
     add_suite org.apache.spark.shuffle.ShuffleRecoverySchedulerAdoptionSuite
     add_suite org.apache.spark.shuffle.ShuffleRecoveryAdoptedFailureSuite
+    add_suite org.apache.spark.shuffle.ShuffleRecoveryNativeAdoptionSuite
+    add_suite org.apache.spark.scheduler.MapStatusSuite
     add_suite org.apache.spark.scheduler.DAGSchedulerSuite
     add_suite org.apache.spark.MapOutputTrackerSuite
     add_suite org.apache.spark.shuffle.BlockStoreShuffleReaderSuite

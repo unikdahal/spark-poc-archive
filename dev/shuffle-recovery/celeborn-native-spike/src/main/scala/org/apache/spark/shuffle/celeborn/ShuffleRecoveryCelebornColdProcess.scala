@@ -24,7 +24,10 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
+import org.apache.spark.FetchFailed
 import org.apache.spark.scheduler._
+
+import org.apache.celeborn.client.ShuffleRecoveryDescriptorEvidence
 import org.apache.spark.shuffle._
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleRecoveryIcebergColdSource}
@@ -34,6 +37,10 @@ object ShuffleRecoveryCelebornColdProcess {
   private class TargetTasks(rddId: Int) extends SparkListener {
     private val stages = ConcurrentHashMap.newKeySet[Integer]()
     val count = new AtomicLong()
+    val fetchFailures = new AtomicLong()
+    override def onTaskEnd(event: SparkListenerTaskEnd): Unit = {
+      if (event.reason.isInstanceOf[FetchFailed]) fetchFailures.incrementAndGet()
+    }
     override def onStageSubmitted(event: SparkListenerStageSubmitted): Unit = {
       if (event.stageInfo.rddInfos.exists(_.id == rddId)) stages.add(event.stageInfo.stageId)
     }
@@ -47,7 +54,7 @@ object ShuffleRecoveryCelebornColdProcess {
     val Array(role, root, evidence, group, control) = args
     require(Set("baseline", "producer", "replacement").contains(role))
     require(Set("none", "source-token", "manifest-missing", "source-snapshot",
-      "producer-filter").contains(control))
+      "producer-filter", "artifact-loss").contains(control))
     require(role == "replacement" || control == "none")
     val source = new ShuffleRecoveryIcebergColdSource
     val builder = SparkSession.builder().master("local[2]")
@@ -115,8 +122,26 @@ object ShuffleRecoveryCelebornColdProcess {
         }
       }
       sc.submitMapStage(dependency).get()
-      if (publication != null) publication.finish()
+      if (publication != null) {
+        val manifest = publication.finish()
+        val (application, shuffle) = ShuffleRecoveryDescriptorEvidence.namespace(
+          manifest.nativeDescriptor.get.toArray)
+        Files.write(Paths.get(root, "producer-namespace"),
+          s"$application\n$shuffle\n".getBytes(UTF_8), StandardOpenOption.CREATE_NEW)
+      }
       val adoptedBeforeRead = adoption != null && adoption.isAdopted
+      if (control == "artifact-loss") {
+        require(adoptedBeforeRead && tasks.count.get() == 0L,
+          "fault must happen after adoption and before ordinary maps run")
+        Files.write(Paths.get(root, "fault-ready"), Array[Byte](1),
+          StandardOpenOption.CREATE_NEW)
+        val deadline = System.nanoTime() + 120000000000L
+        while (!Files.exists(Paths.get(root, "fault-applied")) &&
+            System.nanoTime() < deadline) {
+          Thread.sleep(100L)
+        }
+        require(Files.exists(Paths.get(root, "fault-applied")), "artifact fault timed out")
+      }
       val rows = query.collect().map { row =>
         require(row.length == 3 && !row.anyNull)
         require(row.getLong(0) == row.getLong(1) && row.getString(2).isEmpty)
@@ -128,6 +153,10 @@ object ShuffleRecoveryCelebornColdProcess {
       if (role == "replacement" && control == "none") {
         require(offered && adoptedBeforeRead && adoptedAfterRead && tasks.count.get() == 0L,
           "replacement must read the adopted shuffle without launching target map tasks")
+      } else if (control == "artifact-loss") {
+        require(offered && adoptedBeforeRead && !adoptedAfterRead &&
+          tasks.count.get() > 0L && tasks.fetchFailures.get() > 0L,
+          "lost native files must cause fetch failure and whole-shuffle recomputation")
       } else {
         require(!adoptedBeforeRead && !adoptedAfterRead && tasks.count.get() > 0L,
           "baseline, producer and negative controls must execute target map tasks")
@@ -142,6 +171,8 @@ object ShuffleRecoveryCelebornColdProcess {
         "testedCommit" -> sys.env("SPARK_RECOVERY_TESTED_COMMIT"),
         "rowCount" -> rows.length.toString, "resultDigest" -> digest,
         "mapTaskCount" -> tasks.count.get().toString,
+        "fetchFailures" -> tasks.fetchFailures.get().toString,
+        "adoptedBeforeRead" -> adoptedBeforeRead.toString,
         "offered" -> offered.toString, "adopted" -> adoptedAfterRead.toString,
         "missReason" -> missReason)
       Files.write(Paths.get(evidence), record.map { case (k, v) => s"$k=$v" }
