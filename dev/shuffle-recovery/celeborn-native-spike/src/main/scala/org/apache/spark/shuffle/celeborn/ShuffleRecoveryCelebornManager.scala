@@ -114,7 +114,7 @@ class ShuffleRecoveryCelebornManager(conf: SparkConf, isDriver: Boolean)
       val address = SparkEnv.get.blockManager.blockManagerId
       val location = BlockManagerId(
         "native-recovery-" + UUID.randomUUID(), address.host, address.port)
-      val binding = ShuffleRecoveryCelebornBinding(descriptor, location, driver,
+      val binding = ShuffleRecoveryCelebornBinding(descriptor, location, driver.address, driver.name,
         native.numMappers, native.numReducers, ttlMillis)
       val ownedLease = lease
       claims.put(location, ownedLease)

@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 import scala.util.control.NonFatal
 
-import org.apache.spark.{InterruptibleIterator, TaskContext}
+import org.apache.spark.{InterruptibleIterator, SparkEnv, TaskContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle.{FetchFailedException, ShuffleReader, ShuffleReadMetricsReporter}
 
@@ -64,7 +64,12 @@ private[celeborn] final class ShuffleRecoveryCelebornReader[K, C](
         handle.underlying.dependency.keyOrdering.isEmpty &&
         !handle.underlying.dependency.mapSideCombine)
     }
-    def driverCurrent(): Boolean = binding.driver.askSync[Boolean](
+    // Shuffle handles are deserialized by the task serializer, outside RpcEnv.deserialize.
+    // Carry only an address/name and construct the endpoint reference in this executor's env.
+    val driver = protect {
+      SparkEnv.get.rpcEnv.setupEndpointRef(binding.driverAddress, binding.driverEndpointName)
+    }
+    def driverCurrent(): Boolean = driver.askSync[Boolean](
       ShuffleRecoveryCelebornBindingCurrent(handle.shuffleId, binding.location))
     protect { require(driverCurrent(), "native binding is no longer installed on the driver") }
     val native = protect {

@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import scala.util.control.NonFatal
 
-import org.apache.spark.rpc.RpcEndpointRef
+import org.apache.spark.rpc.RpcAddress
 import org.apache.spark.shuffle.ShuffleHandle
 import org.apache.spark.storage.BlockManagerId
 
@@ -31,7 +31,8 @@ import org.apache.celeborn.client.StandaloneRetainedShuffleReader
 private[celeborn] final case class ShuffleRecoveryCelebornBinding(
     descriptor: Vector[Byte],
     location: BlockManagerId,
-    driver: RpcEndpointRef,
+    driverAddress: RpcAddress,
+    driverEndpointName: String,
     mapperCount: Int,
     reducerCount: Int,
     ttlMillis: Long) extends Serializable
