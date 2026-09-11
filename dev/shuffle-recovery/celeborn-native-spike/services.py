@@ -72,6 +72,9 @@ def main():
     java_options = [f"--add-opens=java.base/{name}=ALL-UNNAMED" for name in opens]
     java_options += ["--add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED",
                      f"-Dlog4j2.configurationFile={log_config}"]
+    # RPC bind addresses and advertised worker locations must name the same interface.
+    service_env = dict(os.environ, CELEBORN_LOCAL_HOSTNAME="127.0.0.1",
+                       SPARK_LOCAL_IP="127.0.0.1")
     processes = []
     streams = []
     java = str(Path(os.environ["JAVA_HOME"]) / "bin/java")
@@ -82,7 +85,8 @@ def main():
         command = [java, "-Xmx768m", "-XX:MaxDirectMemorySize=768m"] + java_options + [
                    "-cp", f"{home}/conf:{home}/{name}-jars/*:{home}/jars/*",
                    main_class, "--host", "127.0.0.1", "--properties-file", str(conf)] + extra
-        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                   env=service_env)
         processes.append(process)
         return process
 
@@ -117,7 +121,7 @@ def main():
                "--master-endpoints", f"127.0.0.1:{master_port}", "--port", str(owner_port)])
         wait_for(lambda: endpoint.is_file() and endpoint.stat().st_size > 0,
                  "retention control endpoint publication")
-        env = dict(os.environ, CELEBORN_RETAINED_ENDPOINT_FILE=str(endpoint),
+        env = dict(service_env, CELEBORN_RETAINED_ENDPOINT_FILE=str(endpoint),
                    CELEBORN_PROOF_WORKER_ROOT=str(worker_data / "retained-proof"),
                    CELEBORN_PROOF_CONTROL_ROOT=str(root))
         child = subprocess.Popen(
