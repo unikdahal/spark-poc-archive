@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import scala.util.control.NonFatal
 
 import org.apache.spark.{InterruptibleIterator, TaskContext}
+import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle.{FetchFailedException, ShuffleReader, ShuffleReadMetricsReporter}
 
 import org.apache.celeborn.client.StandaloneRetainedShuffleReader
@@ -39,11 +40,12 @@ private[celeborn] final class ShuffleRecoveryCelebornReader[K, C](
     endPartition: Int,
     context: TaskContext,
     conf: CelebornConf,
-    metrics: ShuffleReadMetricsReporter) extends ShuffleReader[K, C] {
+    metrics: ShuffleReadMetricsReporter) extends ShuffleReader[K, C] with Logging {
 
   override def read(): Iterator[Product2[K, C]] = {
     var currentPartition = startPartition
     def failed(error: Throwable): Nothing = {
+      logWarning("Native retained reader failed before or during record consumption", error)
       throw new FetchFailedException(binding.location, handle.shuffleId, -1L, -1,
         currentPartition, "native retained shuffle read failed", error)
     }
