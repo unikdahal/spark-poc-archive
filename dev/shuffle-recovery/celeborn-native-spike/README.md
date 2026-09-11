@@ -16,8 +16,9 @@ Required environment:
   standalone LifecycleManager with the retained-shuffle extension enabled.
 
 Run from the Spark repository root. Use paths without whitespace because sbt's
-runMain command parser splits the child arguments. The script compiles once with sbt and exports its resolved test classpath and
-JVM options. Each role then runs in a fresh Java process. Use CI for this
+child command parser splits the arguments. The script compiles the application
+and integration sources once with sbt, then exports its runtime classpath and
+Spark's test JVM options. The normal Core/SQL suites run in their separate CI lane. Each role then runs in a fresh Java process. Use CI for this
 expensive validation. CI compilation and execution are in progress; a committed harness alone is not
 evidence of successful native recovery.
 
@@ -50,7 +51,9 @@ the read must fail through the binding check and trigger correct recomputation.
 The supervisor resumes a paused owner even when the child fails.
 
 The pass marker covers cold-process reuse, concurrent claims, identity controls,
-lease expiry before reading and artifact loss. Owner restart and expiry during
-an already-open executor stream still require additional integration evidence.
+lease expiry before reading, artifact loss and owner-restart rejection. The restart
+control publishes into a separate namespace, restarts the owner on the same port
+with a fresh application/incarnation, and requires ordinary recomputation.
+Expiry during an already-open executor stream still requires additional evidence.
 Provider unit tests exercise independent claim release, exact expiry, clock
 wraparound and owner shutdown.

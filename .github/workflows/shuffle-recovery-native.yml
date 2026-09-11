@@ -115,6 +115,12 @@ jobs:
             build/*.jar
           key: native-spark-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties') }}
           restore-keys: shuffle-recovery-experimental-sql-${{ runner.os }}-
+      - uses: actions/cache/restore@v5
+        id: compiled
+        with:
+          path: '**/target'
+          key: native-compiled-${{ runner.os }}-zulu17-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties') }}-${{ github.sha }}
+          restore-keys: native-compiled-${{ runner.os }}-zulu17-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties') }}-
       - uses: actions/download-artifact@v8
         with: {pattern: 'native-*', path: '${{ runner.temp }}/deps', merge-multiple: true}
       - name: Run native cold-process proof
@@ -125,6 +131,11 @@ jobs:
           export ICEBERG_RUNTIME_JAR="$RUNNER_TEMP/deps/iceberg-runtime.jar"
           export CELEBORN_RUNTIME_JAR="$(find "$CELEBORN_HOME/spark" -name '*.jar' -print -quit)"
           python3 dev/shuffle-recovery/celeborn-native-spike/services.py "$RUNNER_TEMP/native-proof"
+      - uses: actions/cache/save@v5
+        if: always() && steps.compiled.outputs.cache-hit != 'true'
+        with:
+          path: '**/target'
+          key: native-compiled-${{ runner.os }}-zulu17-${{ hashFiles('**/pom.xml', '**/plugins.sbt', 'project/build.properties') }}-${{ github.sha }}
       - uses: actions/upload-artifact@v7
         if: always()
         with:

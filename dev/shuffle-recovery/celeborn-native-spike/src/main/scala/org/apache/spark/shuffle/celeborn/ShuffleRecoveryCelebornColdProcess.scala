@@ -24,7 +24,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
-import org.apache.spark.FetchFailed
+import org.apache.spark.{FetchFailed, SPARK_REVISION}
 import org.apache.spark.scheduler._
 
 import org.apache.celeborn.client.ShuffleRecoveryDescriptorEvidence
@@ -54,11 +54,14 @@ object ShuffleRecoveryCelebornColdProcess {
   }
 
   def main(args: Array[String]): Unit = {
+    require(SPARK_REVISION == sys.env("SPARK_RECOVERY_TESTED_COMMIT"),
+      "runtime build revision must match the tested candidate")
     require(args.length == 5, "role manifestRoot evidence group control")
     val Array(role, root, evidence, group, control) = args
     require(Set("baseline", "producer", "replacement").contains(role))
     require(Set("none", "source-token", "manifest-missing", "source-snapshot",
-      "producer-filter", "artifact-loss", "concurrent", "lease-expiry").contains(control))
+      "producer-filter", "artifact-loss", "concurrent", "lease-expiry", "owner-restart")
+      .contains(control))
     require(role == "replacement" || control == "none")
     val source = new ShuffleRecoveryIcebergColdSource
     val builder = SparkSession.builder().master("local[2]")

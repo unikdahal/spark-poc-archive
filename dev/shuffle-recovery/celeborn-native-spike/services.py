@@ -79,8 +79,8 @@ def main():
     streams = []
     java = str(Path(os.environ["JAVA_HOME"]) / "bin/java")
 
-    def start(name, main_class, extra):
-        log = (root / f"{name}.log").open("w")
+    def start(name, main_class, extra, suffix=""):
+        log = (root / f"{name}{suffix}.log").open("w")
         streams.append(log)
         command = [java, "-Xmx768m", "-XX:MaxDirectMemorySize=768m"] + java_options + [
                    "-cp", f"{home}/conf:{home}/{name}-jars/*:{home}/jars/*",
@@ -130,6 +130,27 @@ def main():
         paused = False
         try:
             while child.poll() is None:
+                if (root / "restart-owner").exists() and not (root / "owner-restarted").exists():
+                    assert not paused, "owner cannot be paused and restarted simultaneously"
+                    old_endpoint = endpoint.read_text()
+                    (root / "owner-before-restart.properties").write_text(old_endpoint)
+                    owner.terminate()
+                    try:
+                        owner.wait(timeout=20)
+                    except subprocess.TimeoutExpired:
+                        owner.kill()
+                        owner.wait()
+                    processes.remove(owner)
+                    endpoint.unlink()
+                    owner = start("lifecycle-manager",
+                        "org.apache.celeborn.server.lifecyclemanager.LifecycleManagerDaemon",
+                        ["--app-id", "cold-" + uuid.uuid4().hex,
+                         "--master-endpoints", f"127.0.0.1:{master_port}",
+                         "--port", str(owner_port)], suffix="-restarted")
+                    wait_for(lambda: endpoint.is_file() and endpoint.stat().st_size > 0,
+                             "restarted owner endpoint publication")
+                    assert endpoint.read_text() != old_endpoint
+                    (root / "owner-restarted").write_text("new incarnation on the same port\n")
                 if (root / "pause-owner").exists() and not (root / "owner-paused").exists():
                     owner.send_signal(signal.SIGSTOP)
                     paused = True

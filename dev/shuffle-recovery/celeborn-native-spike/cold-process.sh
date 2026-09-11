@@ -43,12 +43,13 @@ group="native-$(basename "${work_dir}")"
 export NATIVE_PROOF_CLASSPATH="${evidence_dir}/classpath.txt"
 export NATIVE_PROOF_JAVA_OPTIONS="${evidence_dir}/java-options.txt"
 timeout --kill-after=30s 45m ./build/sbt -Phadoop-3 -Phive 'project sql' \
-  'set Test / unmanagedSourceDirectories ++= Seq("java", "scala").map(lang => file(sys.props("user.dir")) / "dev/shuffle-recovery/iceberg-source-spike/src/main" / lang)' \
-  'set Test / unmanagedSourceDirectories += file(sys.props("user.dir")) / "dev/shuffle-recovery/celeborn-native-spike/src/main/scala"' \
-  'set Test / unmanagedJars ++= Seq("ICEBERG_RUNTIME_JAR", "CELEBORN_RUNTIME_JAR").map(key => file(sys.env(key)))' \
+  'set Compile / unmanagedSourceDirectories ++= Seq("java", "scala").map(lang => file(sys.props("user.dir")) / "dev/shuffle-recovery/iceberg-source-spike/src/main" / lang)' \
+  'set Compile / unmanagedSourceDirectories += file(sys.props("user.dir")) / "dev/shuffle-recovery/celeborn-native-spike/src/main/scala"' \
+  'set Compile / unmanagedSources += file(sys.props("user.dir")) / "sql/core/src/test/scala/org/apache/spark/shuffle/ShuffleRecoveryColdProcessSource.scala"' \
+  'set Compile / unmanagedJars ++= Seq("ICEBERG_RUNTIME_JAR", "CELEBORN_RUNTIME_JAR").map(key => file(sys.env(key)))' \
   'set Test / javaOptions += "-Dspark.shuffle.useOldFetchProtocol=false"' \
-  'set Global / commands += Command.command("exportNativeProof") { state => val ex = Project.extract(state); val (next, cp) = ex.runTask(Test / fullClasspath, state); val (done, opts) = Project.extract(next).runTask(Test / javaOptions, next); IO.write(file(sys.env("NATIVE_PROOF_CLASSPATH")), cp.files.map(_.getAbsolutePath).mkString(java.io.File.pathSeparator)); IO.write(file(sys.env("NATIVE_PROOF_JAVA_OPTIONS")), opts.mkString("\n")); done }' \
-  'Test/compile' 'exportNativeProof' 2>&1 | tee "${evidence_dir}/compile.log"
+  'set Global / commands += Command.command("exportNativeProof") { state => val ex = Project.extract(state); val (next, cp) = ex.runTask(Compile / fullClasspath, state); val (done, opts) = Project.extract(next).runTask(Test / javaOptions, next); IO.write(file(sys.env("NATIVE_PROOF_CLASSPATH")), cp.files.map(_.getAbsolutePath).mkString(java.io.File.pathSeparator)); IO.write(file(sys.env("NATIVE_PROOF_JAVA_OPTIONS")), opts.mkString("\n")); done }' \
+  'Compile/compile' 'exportNativeProof' 2>&1 | tee "${evidence_dir}/compile.log"
 [[ -s "$NATIVE_PROOF_CLASSPATH" && -s "$NATIVE_PROOF_JAVA_OPTIONS" ]]
 mapfile -t java_options < "$NATIVE_PROOF_JAVA_OPTIONS"
 classpath="$(cat "$NATIVE_PROOF_CLASSPATH")"
@@ -103,6 +104,26 @@ wait "$fault_pid"
 run_main rewrite "${setup} rewrite ${evidence_dir}/snapshot-after.txt"
 run_child source-snapshot replacement source-snapshot
 
+# Publish a fresh artifact before restarting its owner; use a separate manifest namespace.
+restart_root="${work_dir}/restart-manifests"
+mkdir "$restart_root"
+run_main restart-producer \
+  "${entry} producer ${restart_root} ${evidence_dir}/restart-producer.properties ${group}-restart none"
+python3 - "$CELEBORN_PROOF_CONTROL_ROOT" <<'RESTART'
+import time
+from pathlib import Path
+import sys
+control = Path(sys.argv[1])
+(control / "restart-owner").write_text("restart the harness-owned lifecycle service\n")
+deadline = time.monotonic() + 120
+while not (control / "owner-restarted").exists():
+    if time.monotonic() > deadline:
+        raise TimeoutError("owner restart did not complete")
+    time.sleep(0.2)
+RESTART
+run_main owner-restart \
+  "${entry} replacement ${restart_root} ${evidence_dir}/owner-restart.properties ${group}-restart owner-restart"
+
 python3 - "${evidence_dir}" <<'CHECK'
 import sys
 from pathlib import Path
@@ -112,7 +133,8 @@ processes = set()
 records = {}
 for name in ("baseline", "producer", "replacement", "concurrent-a", "concurrent-b",
              "source-token",
-             "manifest-missing", "producer-filter", "source-snapshot", "artifact-loss", "lease-expiry"):
+             "manifest-missing", "producer-filter", "source-snapshot", "artifact-loss", "lease-expiry",
+             "restart-producer", "owner-restart"):
     row = dict(line.split("=", 1) for line in
                (root / (name + ".properties")).read_text().splitlines())
     process = (row["pid"], row["started"])
