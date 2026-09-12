@@ -191,19 +191,6 @@ object ShuffleRecoveryCelebornColdProcess {
       require(rows.toVector == (0L until 32L).toVector, "result differs from exact fixture")
       sc.listenerBus.waitUntilEmpty(30000L)
       val adoptedAfterRead = adoption != null && adoption.isAdopted
-      if (role == "replacement" && Set("none", "concurrent").contains(control)) {
-        require(offered && adoptedBeforeRead && adoptedAfterRead && tasks.count.get() == 0L &&
-          tasks.remoteBytesRead.get() > 0L,
-          "replacement must read the adopted shuffle without launching target map tasks")
-      } else if (Set("artifact-loss", "lease-expiry").contains(control)) {
-        require(offered && adoptedBeforeRead && !adoptedAfterRead &&
-          tasks.count.get() > 0L && tasks.fetchFailures.get() > 0L,
-          "unavailable native claim must cause fetch failure and whole-shuffle recomputation")
-      } else {
-        require(!adoptedBeforeRead && !adoptedAfterRead && tasks.count.get() > 0L,
-          "baseline, producer and negative controls must execute target map tasks")
-        if (role == "replacement") require(!offered, "negative control unexpectedly matched")
-      }
       val digest = MessageDigest.getInstance("SHA-256")
         .digest(rows.mkString("\n").getBytes(UTF_8)).map(b => f"${b & 0xff}%02x").mkString
       val process = ProcessHandle.current()
@@ -222,6 +209,21 @@ object ShuffleRecoveryCelebornColdProcess {
         "missReason" -> missReason)
       Files.write(Paths.get(evidence), record.map { case (k, v) => s"$k=$v" }
         .mkString("", "\n", "\n").getBytes(UTF_8), StandardOpenOption.CREATE_NEW)
+      if (role == "replacement" && Set("none", "concurrent").contains(control)) {
+        require(offered && adoptedBeforeRead && adoptedAfterRead && tasks.count.get() == 0L &&
+          tasks.remoteBytesRead.get() > 0L,
+          s"native recovery gate failed: offered=$offered, before=$adoptedBeforeRead, " +
+            s"after=$adoptedAfterRead, maps=${tasks.count.get()}, " +
+            s"bytes=${tasks.remoteBytesRead.get()}")
+      } else if (Set("artifact-loss", "lease-expiry").contains(control)) {
+        require(offered && adoptedBeforeRead && !adoptedAfterRead &&
+          tasks.count.get() > 0L && tasks.fetchFailures.get() > 0L,
+          "unavailable native claim must cause fetch failure and whole-shuffle recomputation")
+      } else {
+        require(!adoptedBeforeRead && !adoptedAfterRead && tasks.count.get() > 0L,
+          "baseline, producer and negative controls must execute target map tasks")
+        if (role == "replacement") require(!offered, "negative control unexpectedly matched")
+      }
     } finally {
       try {
         if (adoption != null) adoption.close()
