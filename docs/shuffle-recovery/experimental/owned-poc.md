@@ -34,6 +34,8 @@ still need to become a complete provider contract. No generic public SPI is decl
 3. A shared-filesystem experiment using loopback NFS and separate Spark executor processes. The
    selected map winners are fetched from those executors through Spark's block transport, copied
    into the retained provider namespace, and read by a fresh replacement application.
+4. Native Celeborn publication, cold-process reads and whole-shuffle fallback from the
+   certified Iceberg producer, using the existing standalone LifecycleManager.
 
 The shared-filesystem experiment is deliberately small. NFS `sync` exports and atomic filesystem
 operations supply the storage substrate; the existing experimental provider supplies the format.
@@ -54,14 +56,16 @@ schema-evolution cache-hit guarantee is made.
 
 The source spike rejects delete-bearing tasks, nested schemas, non-null field defaults and
 unreviewed filter terms/literals. Its bounded digest counts scalar and array bytes together; source
-planning memory is separate from additional certificate work. The real source and durable shuffle
-experiment are not yet one automatically integrated replay query.
+planning memory is separate from additional certificate work. The real source and
+reference-provider durable shuffle experiment now form one integrated replay query.
+Native Celeborn uses the same certified source boundary
+and has separate native end-to-end evidence below.
 
 The delete refusal is exercised with an actual merge-on-read row deletion. Certification must
 report a delete-bearing task; ordinary execution must return every remaining expected row with its
 correct payload. A metadata-only whole-file removal does not satisfy that check.
 
-## Current evidence
+## Earlier reference-provider and source evidence
 
 Candidate `89f3c0673bf764f7a430c9886e45d39bcc978129` passed the complete
 [Actions gate](https://github.com/unikdahal/spark/actions/runs/34274067280): routing, lint/license,
@@ -107,11 +111,85 @@ experiment records the mount, process logs, result digests, skipped maps and pro
 It also requires distinct child process identities and matching commit provenance, and checks that
 a changed source token or missing provider index triggers recomputation with identical results.
 
-The next runtime work is to connect the certified actual SQL producer to publication and adoption,
-then replace dense status reconstruction with explicit provider-native reads and prove complete
-consumer invalidation. Those behaviors are not implemented merely because this document exists.
+The native implementation now connects certified SQL publication, descriptor discovery,
+lease-backed adoption, native executor readers and whole-shuffle invalidation.
+Its small scheduling-statistics matrix is bounded rather than scalable. Completion
+of these code paths is separate from the native execution evidence below.
 
 Candidate `7c52afc16cd` passed every job in
 [run 34369849014](https://github.com/unikdahal/spark/actions/runs/34369849014), including the
-generic cold-process source adapter path and certified dependency tests. The following
-Iceberg adapter and cold-process runner are new work and require their own CI validation.
+generic cold-process source adapter path and certified dependency tests. Subsequent
+Iceberg and native provider results are recorded below.
+
+## Verified baseline and native validation
+
+Candidate `c266372dda25c8ad3ad8359f11b3455e4a4eb94e` passed every experimental
+job in [run 34525774352](https://github.com/unikdahal/spark/actions/runs/34525774352).
+The downloaded Core reports include four native-manifest tests and three
+native-adoption tests with no failures or skips, together with the existing
+scheduler, tracker, reader, publication and identity suites.
+
+Its actual Iceberg/reference-provider cold replacement returned the baseline's
+32 rows, launched zero target map tasks and read 1,152 retained bytes. Source-token,
+producer-filter, missing-artifact and real snapshot-rewrite controls each ran one
+fresh map task, read no retained bytes and returned the same result digest.
+That evidence proves source-certified recovery with the reference format; it does
+not substitute for native Celeborn execution.
+
+The native harness checks separate driver processes, exact results, zero target
+map tasks plus positive remote bytes for adopted reads, simultaneous independent
+claims, source/manifest misses, real lease expiry, persisted worker-file loss and
+rejection after an owner restart. Incremental compilation caches regenerate build
+metadata, and each native driver requires the runtime Spark revision to equal the
+CI candidate. See the [SPIP draft](spip-draft.md) for proposed scope and release
+gates; no production authorization, AQE, scalability or acceptance claim follows
+from these prototype tests.
+
+## Completed native proof
+
+Candidate `93c048e1d379d274e074cd3a9e77a636c01fe29c` passed all jobs in
+[native run 34677866614](https://github.com/unikdahal/spark/actions/runs/34677866614).
+The same implementation candidate passed Core, SQL/AQE, lint/license and pinned
+Iceberg source conformance in
+[general run 34677977967](https://github.com/unikdahal/spark/actions/runs/34677977967).
+The final documentation commit changes only these evidence notes and the proposal;
+all executable code remains identical to this validated candidate.
+
+The retained `native-proof-evidence` artifact contains the pass marker,
+per-process measurements, native service logs, file-loss inventory, compile log,
+jar checksums and exact candidate provenance. Celeborn is pinned to
+`edb413ee3d5e77fbecf43afa7b1a33d6054ab569` in the user's fork.
+
+| Scenario | Target map tasks | Fetch failures | Outcome |
+| --- | ---: | ---: | --- |
+| Cold replacement | 0 | 0 | Native reuse; 730 remote bytes |
+| Concurrent reader A | 0 | 0 | Independent native claim; 730 remote bytes |
+| Concurrent reader B | 0 | 0 | Independent native claim; 730 remote bytes |
+| Persisted file loss after adoption | 1 | 2 | Whole-shuffle fallback |
+| Lease expiry after adoption | 1 | 3 | Whole-shuffle fallback |
+| Changed source token | 1 | 0 | Preparation miss |
+| Changed producer filter | 1 | 0 | Preparation miss |
+| Missing manifest | 1 | 0 | Preparation miss |
+| Real Iceberg snapshot rewrite | 1 | 0 | Preparation miss |
+| Owner restart | 1 | 0 | Old incarnation rejected |
+
+All 13 driver roles, including the baseline and two producers, returned the same
+32-row result and digest
+`25a09c0e32dacd10d7ff9c20a605112c38ea0ecaecc0c3bca23f94cce13703b5`.
+The file-loss control removed eight persisted files totaling 826 bytes while the
+worker and owner remained alive. Remote bytes in fallback runs include ordinary
+fresh shuffle reads and must not be counted as retained-data reuse.
+
+Successful reuse is measured before SQL cleanup releases the binding: the
+replacement had an installed native binding, executed no target maps, observed no
+fetch failures and read native remote bytes. `bindingAfterRead=false` records
+normal end-of-query cleanup rather than failed adoption. Independent concurrent
+claims and the later fault controls demonstrate that one reader's cleanup did
+not delete the shared producer artifact.
+
+This is a correctness feasibility proof on a small isolated fixture with one
+actual source mapper and four reducers. Drivers are separate JVMs on one host;
+each uses local Spark executors, while Celeborn services are separate processes.
+It does not establish multi-host executor or network-partition behavior. It is not a performance benchmark or a
+production-readiness claim. Authenticated reuse, supported AQE shapes, metadata
+scale and expiry during an already-open stream remain explicit follow-on gates.

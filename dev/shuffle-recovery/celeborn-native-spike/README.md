@@ -24,7 +24,9 @@ evidence of successful native recovery.
 
 The baseline uses Spark's ordinary shuffle manager. The producer publishes its
 native descriptor and the replacement must return the exact fixture with zero
-target map task launches and an adopted binding before and after reading.
+target map task launches, an adopted binding before reading, positive remote bytes
+and no fetch failures. Post-query binding state is recorded separately because SQL
+execution cleanup can release a successfully consumed binding before collect returns.
 Source token, producer filter, missing manifest and actual Iceberg snapshot
 changes must all reject recovery and launch fresh map tasks. Every role's
 result digest must match the baseline. Evidence includes process identities,

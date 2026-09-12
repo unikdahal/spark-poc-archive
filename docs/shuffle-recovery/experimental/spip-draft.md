@@ -2,8 +2,8 @@
 
 Status: discussion draft backed by an experimental fork. No PMC endorsement,
 shepherd, public API commitment or release target is implied. The native
-Iceberg/Celeborn integration is undergoing CI validation; its results must be
-attached before presenting it as a demonstrated end-to-end implementation.
+Iceberg/Celeborn proof has passed cold-process reuse and its bounded fault-control
+suite; the evidence below establishes prototype feasibility, not release readiness.
 
 ## Summary and decision requested
 
@@ -183,7 +183,20 @@ The reference-provider cold-process tests establish a baseline mechanism. The
 native workflow builds pinned Iceberg and Celeborn sources and launches independent
 producer/replacement JVMs against an independently owned lifecycle service.
 
-Before claiming native feasibility, the exact candidate must pass:
+Native candidate `93c048e1d379d274e074cd3a9e77a636c01fe29c` passed
+[native run 34677866614](https://github.com/unikdahal/spark/actions/runs/34677866614)
+and the Core, SQL/AQE, quality and pinned Iceberg jobs in
+[general run 34677977967](https://github.com/unikdahal/spark/actions/runs/34677977967).
+The cold replacement and two concurrent replacements each returned the exact
+32-row baseline, ran zero target maps and read 730 native remote bytes without
+fetch failures. Persisted worker-file loss and real lease expiry each triggered
+fetch failure and correct whole-shuffle recomputation. Source-token, filter,
+manifest, snapshot-rewrite and owner-restart controls each declined reuse.
+All 13 independent driver roles returned the same digest. See the
+[implementation evidence](owned-poc.md#completed-native-proof) for measurements,
+provenance and the distinction between successful reuse and SQL binding cleanup.
+
+The required native feasibility gates are:
 
 1. Current Core/SQL regression, style and license gates.
 2. Pinned source conformance and provider retention/descriptor tests.
