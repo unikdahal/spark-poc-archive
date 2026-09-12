@@ -2322,8 +2322,9 @@ private[spark] class DAGScheduler(
         Utils.cloneProperties(properties)))
     submitStage(finalStage)
 
-    // If the whole stage has already finished, tell the listener and remove it
-    if (finalStage.isAvailable) {
+    // Submission can synchronously finish an adopted stage and remove its active job.
+    // Complete an already available stage only if submission has not completed this job.
+    if (finalStage.isAvailable && jobIdToActiveJob.get(jobId).contains(job)) {
       markMapStageJobAsFinished(job, mapOutputTracker.getStatistics(dependency))
     }
   }

@@ -46,6 +46,7 @@ timeout --kill-after=30s 45m ./build/sbt -Phadoop-3 -Phive 'project sql' \
   'set Compile / unmanagedSourceDirectories ++= Seq("java", "scala").map(lang => file(sys.props("user.dir")) / "dev/shuffle-recovery/iceberg-source-spike/src/main" / lang)' \
   'set Compile / unmanagedSourceDirectories += file(sys.props("user.dir")) / "dev/shuffle-recovery/celeborn-native-spike/src/main/scala"' \
   'set Compile / unmanagedSources += file(sys.props("user.dir")) / "sql/core/src/test/scala/org/apache/spark/shuffle/ShuffleRecoveryColdProcessSource.scala"' \
+  'set Compile / unmanagedSources += file(sys.props("user.dir")) / "sql/core/src/test/scala/org/apache/spark/sql/execution/exchange/ShuffleRecoveryCanonicalRangeInputs.scala"' \
   'set Compile / unmanagedJars ++= Seq("ICEBERG_RUNTIME_JAR", "CELEBORN_RUNTIME_JAR").map(key => file(sys.env(key)))' \
   'set Test / javaOptions += "-Dspark.shuffle.useOldFetchProtocol=false"' \
   'set Global / commands += Command.command("exportNativeProof") { state => val ex = Project.extract(state); val (next, cp) = ex.runTask(Compile / fullClasspath, state); val (done, opts) = Project.extract(next).runTask(Test / javaOptions, next); IO.write(file(sys.env("NATIVE_PROOF_CLASSPATH")), cp.files.map(_.getAbsolutePath).mkString(java.io.File.pathSeparator)); IO.write(file(sys.env("NATIVE_PROOF_JAVA_OPTIONS")), opts.mkString("\n")); done }' \

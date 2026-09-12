@@ -3003,9 +3003,17 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
     results.clear()
     assertDataStructuresEmpty()
 
-    // Check that if we submit the map stage again, no tasks run
-    submitMapStage(shuffleDep)
-    assert(results.size === 1)
+    // Check that if we submit the map stage again, no tasks run and it completes once.
+    var completions = 0
+    val listener = new SimpleListener {
+      override def taskSucceeded(index: Int, result: Any): Unit = {
+        completions += 1
+        super.taskSucceeded(index, result)
+      }
+    }
+    submitMapStage(shuffleDep, listener)
+    assert(listener.results.size === 1)
+    assert(completions === 1)
     assertDataStructuresEmpty()
   }
 
